@@ -7723,6 +7723,9 @@ def draw_input_field(surface, rect, text, placeholder, active):
         pygame.draw.line(surface, C("PURPLE"), (cx, rect.y + 12), (cx, rect.bottom - 12), 2)
 
 
+GOOGLE_READY = google_auth.is_configured()
+
+
 def draw_signin_screen(surface):
     global signin_user_rect, signin_pw_rect, signin_login_btn, signin_create_btn, signin_guest_btn, signin_google_btn, signin_google_up_btn, signin_forgot_rect
     now = time.time()
@@ -7747,40 +7750,44 @@ def draw_signin_screen(surface):
     signin_login_btn = pygame.Rect(40, 336, WIDTH - 80, 50)
     draw_button(surface, signin_login_btn, "Log In", C("INK"), C("CARD"), radius=14)
 
-    div_y = 408
-    pygame.draw.line(surface, C("BORDER"), (40, div_y), (WIDTH // 2 - 22, div_y), 1)
-    pygame.draw.line(surface, C("BORDER"), (WIDTH // 2 + 22, div_y), (WIDTH - 40, div_y), 1)
-    draw_text(surface, "or", font_small, C("LIGHT_GRAY"), WIDTH // 2, div_y - 10, align="center")
+    # Google buttons only appear when a Google OAuth client is bundled (public builds ship without one).
+    lift = 0 if GOOGLE_READY else 72
+    signin_google_btn = signin_google_up_btn = None
+    if GOOGLE_READY:
+        div_y = 408
+        pygame.draw.line(surface, C("BORDER"), (40, div_y), (WIDTH // 2 - 22, div_y), 1)
+        pygame.draw.line(surface, C("BORDER"), (WIDTH // 2 + 22, div_y), (WIDTH - 40, div_y), 1)
+        draw_text(surface, "or", font_small, C("LIGHT_GRAY"), WIDTH // 2, div_y - 10, align="center")
 
-    waiting = google_auth.result["status"] == "waiting"
-    half = (WIDTH - 80 - 10) // 2
-    signin_google_btn = pygame.Rect(40, 428, half, 48)
-    signin_google_up_btn = pygame.Rect(40 + half + 10, 428, half, 48)
-    for rect, label in ((signin_google_btn, "Google Log In"), (signin_google_up_btn, "Google Sign Up")):
-        draw_button(surface, rect, "", C("CARD"), C("INK"), radius=14)
-        pygame.draw.rect(surface, C("BORDER"), rect, 1, border_radius=14)
-        gx, gy = rect.x + 22, rect.centery
-        for i, col in enumerate(((66, 133, 244), (52, 168, 83), (251, 188, 5), (234, 67, 53))):
-            pygame.draw.arc(surface, col, pygame.Rect(gx - 8, gy - 8, 16, 16), i * math.pi / 2 + 0.3, (i + 1) * math.pi / 2 + 0.3, 3)
-        draw_text(surface, "Waiting..." if waiting else label, font_small_bold, C("INK"), rect.centerx + 10, rect.y + 15, align="center")
+        waiting = google_auth.result["status"] == "waiting"
+        half = (WIDTH - 80 - 10) // 2
+        signin_google_btn = pygame.Rect(40, 428, half, 48)
+        signin_google_up_btn = pygame.Rect(40 + half + 10, 428, half, 48)
+        for rect, label in ((signin_google_btn, "Google Log In"), (signin_google_up_btn, "Google Sign Up")):
+            draw_button(surface, rect, "", C("CARD"), C("INK"), radius=14)
+            pygame.draw.rect(surface, C("BORDER"), rect, 1, border_radius=14)
+            gx, gy = rect.x + 22, rect.centery
+            for i, col in enumerate(((66, 133, 244), (52, 168, 83), (251, 188, 5), (234, 67, 53))):
+                pygame.draw.arc(surface, col, pygame.Rect(gx - 8, gy - 8, 16, 16), i * math.pi / 2 + 0.3, (i + 1) * math.pi / 2 + 0.3, 3)
+            draw_text(surface, "Waiting..." if waiting else label, font_small_bold, C("INK"), rect.centerx + 10, rect.y + 15, align="center")
 
     # Account creation lives in a light text link so the screen isn't a wall of buttons.
     lead = "New here? "
     link = "Create an account"
     lw, ww = font_body.size(lead)[0], font_body_bold.size(link)[0]
     lx = WIDTH // 2 - (lw + ww) // 2
-    signin_create_btn = pygame.Rect(lx - 6, 492, lw + ww + 12, 30)
+    signin_create_btn = pygame.Rect(lx - 6, 492 - lift, lw + ww + 12, 30)
     hover = signin_create_btn.collidepoint(pygame.mouse.get_pos())
-    draw_text(surface, lead, font_body, C("GRAY"), lx, 497)
-    lr = draw_text(surface, link, font_body_bold, C("PURPLE"), lx + lw, 497)
+    draw_text(surface, lead, font_body, C("GRAY"), lx, 497 - lift)
+    lr = draw_text(surface, link, font_body_bold, C("PURPLE"), lx + lw, 497 - lift)
     if hover:
         pygame.draw.line(surface, C("PURPLE"), (lr.x, lr.bottom), (lr.right, lr.bottom), 1)
 
-    signin_guest_btn = pygame.Rect(WIDTH // 2 - 100, 530, 200, 30)
+    signin_guest_btn = pygame.Rect(WIDTH // 2 - 100, 530 - lift, 200, 30)
     draw_text(surface, "Continue as Guest", font_small_bold, C("GRAY"), WIDTH // 2, signin_guest_btn.y + 6, align="center")
 
     if state.auth_message or google_auth.result["message"]:
-        draw_text(surface, state.auth_message or google_auth.result["message"], font_tiny, C("RED"), WIDTH // 2, 574, align="center", max_width=WIDTH - 60)
+        draw_text(surface, state.auth_message or google_auth.result["message"], font_tiny, C("RED"), WIDTH // 2, 574 - lift, align="center", max_width=WIDTH - 60)
     draw_ticker_tape(surface, HEIGHT - 78, now)
     draw_text(surface, "Your account is saved only on this computer.",
               font_tiny, C("LIGHT_GRAY"), WIDTH // 2, HEIGHT - 30, align="center")

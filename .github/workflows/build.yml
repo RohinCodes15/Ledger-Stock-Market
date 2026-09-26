@@ -1,0 +1,31 @@
+name: build
+# Builds the downloadable game for Mac and Windows.
+# Run it from the Actions tab ("Run workflow") or by pushing a tag like v1.0.1.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pyinstaller pillow
+      - run: python -m unittest discover -s tests
+      - run: pyinstaller --noconfirm --clean Ledger.spec
+      - name: Zip (Mac)
+        if: runner.os == 'macOS'
+        run: cd dist && ditto -c -k --keepParent Ledger.app Ledger-mac.zip
+      - name: Zip (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/Ledger -DestinationPath dist/Ledger-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Ledger-${{ runner.os }}
+          path: dist/Ledger-*.zip

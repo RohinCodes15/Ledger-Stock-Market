@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+import sys
 # Build with ./build_app.sh (Mac) or: pyinstaller Ledger.spec (Windows)
 import os
 import re
@@ -53,17 +54,18 @@ coll = COLLECT(
     upx_exclude=[],
     name='Ledger',
 )
-app = BUNDLE(
-    coll,
-    name='Ledger.app',
-    icon="assets/icon.png",
-    bundle_identifier=BUNDLE_ID,
-    version=VERSION,
-    info_plist={
-        "CFBundleShortVersionString": VERSION,
-        "CFBundleVersion": VERSION,
-        "NSHighResolutionCapable": True,
-        "LSApplicationCategoryType": "public.app-category.educational-games",
-        "NSHumanReadableCopyright": "Ledger. Pretend money for learning.",
-    },
-)
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name='Ledger.app',
+        icon="assets/icon.png",
+        bundle_identifier=BUNDLE_ID,
+        version=VERSION,
+        info_plist={
+            "CFBundleShortVersionString": VERSION,
+            "CFBundleVersion": VERSION,
+            "NSHighResolutionCapable": True,
+            "LSApplicationCategoryType": "public.app-category.educational-games",
+            "NSHumanReadableCopyright": "Ledger. Pretend money for learning.",
+        },
+    )
