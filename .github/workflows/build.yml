@@ -19,6 +19,27 @@ jobs:
       - run: pip install -r requirements.txt pyinstaller pillow
       - run: python -m unittest discover -s tests
       - run: pyinstaller --noconfirm --clean Ledger.spec
+      - name: Launch test (Windows)
+        if: runner.os == 'Windows'
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: |
+          $p = Start-Process -FilePath dist/Ledger/Ledger.exe -PassThru
+          Start-Sleep -Seconds 12
+          if ($p.HasExited) { Write-Error "Ledger.exe exited early with code $($p.ExitCode)"; exit 1 }
+          Stop-Process -Id $p.Id
+          Write-Output "Ledger.exe ran for 12 seconds without crashing"
+      - name: Launch test (Mac)
+        if: runner.os == 'macOS'
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: |
+          dist/Ledger.app/Contents/MacOS/Ledger & PID=$!
+          sleep 12
+          kill -0 $PID || { echo "Ledger exited early"; exit 1; }
+          kill $PID; echo "Ledger ran for 12 seconds without crashing"
       - name: Zip (Mac)
         if: runner.os == 'macOS'
         run: cd dist && ditto -c -k --keepParent Ledger.app Ledger-mac.zip
