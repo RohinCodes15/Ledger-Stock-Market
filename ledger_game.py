@@ -10215,11 +10215,18 @@ def draw_portfolio_tab(surface):
             sg_panel(surface, rect, 18, color=SG_PANEL_2 if hov else SG_PANEL)
             draw_ticker_badge(surface, s["ticker"], rect.x + 14, rect.y + 18, size=44)
             draw_text(surface, s["name"], font_body_bold, SG_TEXT, rect.x + 70, rect.y + 14, max_width=150)
-            draw_text(surface, f"{shares:g} shares  ·  paid {fmt_money(avg)}", font_tiny, SG_MUTED, rect.x + 70, rect.y + 37, max_width=176)
+            draw_text(surface, f"{_shares_label(shares)}  ·  paid {fmt_money(avg)}", font_tiny, SG_MUTED, rect.x + 70, rect.y + 37, max_width=176)
             draw_text(surface, "Tap to sell", font_tiny, SG_PURPLE, rect.x + 70, rect.y + 55)
             draw_mini_chart(surface, s["history"][-40:], pnl >= 0, rect.x + 256, rect.y + 30, 40, 22, color=SG_GREEN if pnl >= 0 else SG_RED,
                             anim_key=("pf", s["ticker"]), **smooth_chart_args())
-            draw_text(surface, fmt_money(value), font_body_bold, SG_TEXT, rect.right - 14, rect.y + 16, align="right")
+            # Same green/red pulse as the Market rows, keyed on the stock price so both pulse together.
+            flash, went_up = price_flash(("pf_px", s["ticker"]), s["price"])
+            value_text = fmt_money(tween(("pf_val", s["ticker"]), value, 6.0))
+            if flash > 0:
+                vw = font_body_bold.size(value_text)[0]
+                draw_alpha_rect(surface, (rect.right - 20 - vw, rect.y + 13, vw + 12, 24), SG_GREEN if went_up else SG_RED,
+                                70 * flash, radius=8)
+            draw_text(surface, value_text, font_body_bold, SG_TEXT, rect.right - 14, rect.y + 16, align="right")
             chip_t = f"{'+' if pnl >= 0 else '-'}{fmt_money(abs(pnl))}"
             cw = font_tiny.size(chip_t)[0] + 16
             chip = pygame.Rect(rect.right - 14 - cw, rect.y + 44, cw, 22)
