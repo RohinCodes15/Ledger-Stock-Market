@@ -3,7 +3,7 @@
 import os
 import re
 
-VERSION = re.search(r'^VERSION = "([^"]+)"', open("Ledger Game.py", encoding="utf-8").read(), re.M).group(1)
+VERSION = re.search(r'^VERSION = "([^"]+)"', open("ledger_game.py", encoding="utf-8").read(), re.M).group(1)
 BUNDLE_ID = "com.rohinpidathala.ledger"
 
 # Google sign-in needs its OAuth client file inside the app. Without it the app still works,
@@ -11,7 +11,7 @@ BUNDLE_ID = "com.rohinpidathala.ledger"
 datas = [("google_config.json", ".")] if os.path.exists("google_config.json") else []
 
 a = Analysis(
-    ['Ledger Game.py'],
+    ['ledger_game.py'],
     pathex=[],
     binaries=[],
     datas=datas,

@@ -1,12 +1,10 @@
 """
-Ledger - A paper-money stock trading game for kids & teens
-=====================================================
-Run with: python "Ledger Game.py"
-Requires: pip install pygame
+Ledger - a pretend-money stock trading game for kids & teens
+=============================================================
+Run with: python ledger_game.py   (requires: pip install -r requirements.txt)
 
-All money is fake. When internet access is available, Ledger uses current market quotes and
-real financial-news headlines for the educational market. If live data cannot be reached,
-it safely falls back to the simulated market.
+All money is fake. Prices come from a built-in market simulation (calm day-to-day moves, sector
+trends and rare news events). An optional live-quote mode exists but is switched off.
 """
 
 import os

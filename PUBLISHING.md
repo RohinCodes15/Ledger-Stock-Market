@@ -26,7 +26,7 @@ Needs you (accounts, money or decisions):
 4. **Privacy policy**: fill in the date and contact in `PRIVACY.md`, have it reviewed, and host it
    somewhere public (your download page).
 5. **Update check**: host a JSON file like `{"latest": "1.0.1", "download": "https://..."}` and set
-   `UPDATE_URL` in `Ledger Game.py`.
+   `UPDATE_URL` in `ledger_game.py`.
 6. **Where to publish**: itch.io is the easiest for a free desktop game (upload the zip).
 7. **If you turn on live market data** (`live_mode`): use a licensed data provider instead of
    Yahoo Finance's unofficial endpoints.

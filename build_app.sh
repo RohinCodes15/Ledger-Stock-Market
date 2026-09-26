@@ -20,7 +20,7 @@ if [[ -n "$LEDGER_SIGN_ID" ]]; then
   echo "Signed with $LEDGER_SIGN_ID"
 fi
 
-VERSION=$(grep -m1 '^VERSION = ' "Ledger Game.py" | cut -d'"' -f2)
+VERSION=$(grep -m1 '^VERSION = ' "ledger_game.py" | cut -d'"' -f2)
 ZIP="dist/Ledger-$VERSION-mac.zip"
 rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
