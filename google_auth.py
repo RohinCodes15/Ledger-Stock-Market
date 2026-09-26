@@ -18,7 +18,9 @@ except ImportError:
     SSL_CONTEXT = ssl.create_default_context()
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "google_config.json")
+# In the packaged app PyInstaller unpacks bundled files into sys._MEIPASS; from source, look next to this file.
+_HERE = getattr(__import__("sys"), "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+CONFIG_PATH = os.path.join(_HERE, "google_config.json")
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -33,17 +35,15 @@ def _valid(cfg):
 
 
 def _candidate_files():
-    here = os.path.dirname(os.path.abspath(__file__))
     yield CONFIG_PATH
-    # Google's "Download JSON" file (client_secret_....json) works as-is, from here or Downloads.
-    for folder in (here, os.path.expanduser("~/Downloads")):
-        try:
-            names = sorted(os.listdir(folder), key=lambda n: -os.path.getmtime(os.path.join(folder, n)))
-        except OSError:
-            continue
-        for n in names:
-            if n.startswith("client_secret") and n.endswith(".json"):
-                yield os.path.join(folder, n)
+    # Google's "Download JSON" file (client_secret_....json) also works if placed next to the game.
+    try:
+        names = sorted(os.listdir(_HERE))
+    except OSError:
+        return
+    for n in names:
+        if n.startswith("client_secret") and n.endswith(".json"):
+            yield os.path.join(_HERE, n)
 
 
 def load_config():

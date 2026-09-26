@@ -20,11 +20,13 @@ import traceback
 import time
 import math
 import struct
+import subprocess
 import threading
 import urllib.parse
 import urllib.request
 import concurrent.futures
 import google_auth
+import ledger_safety
 
 os.environ["SDL_VIDEO_HIGHDPI"] = "1"
 
@@ -362,8 +364,19 @@ THEMES = {
 }
 
 
+# Colorblind-friendly swap: blue for "up", orange for "down" (Okabe-Ito palette).
+COLORBLIND = {
+    "light": {"GREEN": (0, 114, 178), "RED": (213, 94, 0), "FLASH_GREEN": (0, 114, 178), "FLASH_RED": (213, 94, 0)},
+    "dark": {"GREEN": (86, 180, 233), "RED": (230, 159, 0), "FLASH_GREEN": (86, 180, 233), "FLASH_RED": (230, 159, 0)},
+}
+
+
 def C(key):
     mode = "dark" if state.dark_mode else "light"
+    if getattr(state, "colorblind", False):
+        swap = COLORBLIND[mode].get(key)
+        if swap:
+            return swap
     return THEMES[mode][key]
 
 
@@ -2373,6 +2386,8 @@ class GameState:
         self.settings_old_pw = ""
         self.settings_new_user = ""
         self.settings_new_pw = ""
+        self.settings_delete_pw = ""
+        self.settings_confirm_delete = False
         self.settings_active_field = None
 
         self.friend_input_text = ""
@@ -2451,13 +2466,47 @@ class GameState:
         self.perf_history = []    # [time, net worth, benchmark price], sampled every PERF_SAMPLE_SECONDS
         self.gym_stats = {}       # per-game bests and counters
         self.last_bias_toast = 0.0
+        self.colorblind = False
+        self.play_day = ""
+        self.play_seconds_today = 0.0
+        self.parent_unlocked = False
 
 
 state = GameState()
 
 
 def _password_hash(password):
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+    return ledger_safety.hash_secret(password)
+
+
+_login_limiter = ledger_safety.AttemptLimiter(limit=5, lock_seconds=60)
+_pin_limiter = ledger_safety.AttemptLimiter(limit=5, lock_seconds=60)
+_state_pw_hash = {"pw": None, "hash": None}
+
+
+def _hash_for_current_password():
+    """scrypt is slow on purpose, so hash the in-memory password once, not on every autosave."""
+    if _state_pw_hash["pw"] != state.password:
+        _state_pw_hash.update(pw=state.password, hash=_password_hash(state.password))
+    return _state_pw_hash["hash"]
+
+
+def _clean_legacy_records(data):
+    """Older saves kept the password and email in plain text. Hash the password, drop the email."""
+    changed = False
+    for rec in data.get("accounts", {}).values():
+        if not isinstance(rec, dict):
+            continue
+        plain = rec.pop("password", None)
+        if plain is not None:
+            changed = True
+            if plain and not rec.get("password_hash"):
+                rec["password_hash"] = _password_hash(str(plain))
+        for k in ("email", "is_google"):
+            if k in rec:
+                rec.pop(k)
+                changed = True
+    return changed
 
 
 def _profile_data():
@@ -2489,6 +2538,8 @@ def _profile_data():
         "week_id": state.week_id, "week_points": int(state.week_points),
         "trade_reviews": list(getattr(state, "trade_reviews", []))[:10],
         "reduced_motion": bool(getattr(state, "reduced_motion", False)),
+        "colorblind": bool(getattr(state, "colorblind", False)),
+        "play_day": getattr(state, "play_day", ""), "play_seconds_today": float(getattr(state, "play_seconds_today", 0.0)),
         "alerts": dict(getattr(state, "alerts", {})),
         "pending_orders": list(getattr(state, "pending_orders", [])),
         "recurring_orders": list(getattr(state, "recurring_orders", [])),
@@ -2518,15 +2569,20 @@ def _read_accounts():
             data = json.load(file)
         if not isinstance(data, dict) or not isinstance(data.get("accounts"), dict):
             return {"accounts": {}}
+        if _clean_legacy_records(data):
+            _write_accounts(data)
         return data
     except (OSError, ValueError, TypeError):
         return {"accounts": {}}
 
 
 def _write_accounts(data):
+    # Write to a temp file then swap it in, so a crash mid-save can't wipe every account.
+    tmp = ACCOUNTS_FILE + ".tmp"
     try:
-        with open(ACCOUNTS_FILE, "w", encoding="utf-8") as file:
+        with open(tmp, "w", encoding="utf-8") as file:
             json.dump(data, file, indent=2)
+        os.replace(tmp, ACCOUNTS_FILE)
         return True
     except OSError:
         return False
@@ -2582,6 +2638,12 @@ def _load_profile_data(data):
     state.quests_claimed = [q for q in data.get("quests_claimed", []) if isinstance(q, str)]
     state.trade_reviews = [r for r in data.get("trade_reviews", []) if isinstance(r, str)][:10]
     state.reduced_motion = bool(data.get("reduced_motion", False))
+    state.colorblind = bool(data.get("colorblind", False))
+    state.play_day = str(data.get("play_day", "") or "")
+    try:
+        state.play_seconds_today = float(data.get("play_seconds_today", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        state.play_seconds_today = 0.0
     history = data.get("net_worth_history", [])
     state.net_worth_history = history[-120:] if history else [STARTING_CASH]
     state.trade_log = [t for t in data.get("trade_log", []) if isinstance(t, dict)][-TRADE_LOG_MAX:]
@@ -2640,7 +2702,7 @@ def save_game():
         record = {}
     record["username"] = state.account_username
     if getattr(state, "password", ""):
-        record["password_hash"] = _password_hash(state.password)
+        record["password_hash"] = _hash_for_current_password()
     else:
         # Google log-ins don't type a password; keep the one chosen at sign-up.
         record.setdefault("password_hash", "")
@@ -2658,8 +2720,9 @@ def _reset_to_fresh_state():
 def create_account(username, password):
     username = " ".join(username.strip().split())
     password = password.strip()
-    if len(username) < 3:
-        state.auth_message = "Username must be at least 3 characters."
+    problem = ledger_safety.username_problem(username)
+    if problem:
+        state.auth_message = problem
         return False
     if len(password) < 4:
         state.auth_message = "Password must be at least 4 characters."
@@ -2706,12 +2769,22 @@ def login_account(username, password, trusted=False):
         return False
 
     stored_hash = record.get("password_hash", "")
+    wait = _login_limiter.seconds_locked(key)
+    if wait and not trusted:
+        state.auth_message = f"Too many tries. Wait {wait} seconds and try again."
+        return False
     if trusted:
         pass
     elif stored_hash:
-        if _password_hash(password) != stored_hash:
+        ok, upgrade = ledger_safety.verify_secret(password, stored_hash)
+        if not ok:
+            _login_limiter.miss(key)
             state.auth_message = "Incorrect password."
             return False
+        _login_limiter.success(key)
+        if upgrade:
+            record["password_hash"] = _password_hash(password)
+            _write_accounts(accounts)
     elif password:
         state.auth_message = "This old account has no password. Leave it blank once to sign in."
         return False
@@ -2721,6 +2794,7 @@ def login_account(username, password, trusted=False):
     state.account_username = record.get("username", username)
     state.password = password
     _load_profile_data(record.get("profile", {}))
+    load_parental()
     state.screen_mode = "playing" if state.tutorial_completed else "tutorial"
     # Force a fresh market connection as soon as the account is opened.
     # The player should never wait for the normal refresh timer.
@@ -2741,6 +2815,9 @@ def login_account(username, password, trusted=False):
 def logout_account():
     save_game()
     _reset_to_fresh_state()
+    parental.clear()
+    time_up.update(active=False, asking=False, pin="", msg="")
+    parent_ui.update(mode="", pin="", first="", msg="")
     state.screen_mode = "signin"
     state.auth_message = ""
 
@@ -3047,7 +3124,7 @@ def next_scenario():
 # Yahoo Finance's public chart/search endpoints provide current/historical quotes and
 # headlines without putting an API key into the game. This is intended for a local,
 # educational project. We cache aggressively so the game does not hammer the service.
-LIVE_PRICE_REFRESH = 3.0
+LIVE_PRICE_REFRESH = 15.0
 LIVE_NEWS_REFRESH = 90.0
 LIVE_STOCK_BATCH = 10
 LIVE_INITIAL_BATCH = 6
@@ -3234,7 +3311,7 @@ def _fetch_news_for_ticker(ticker):
     out = []
     for item in data.get("news", [])[:5]:
         title = str(item.get("title") or "").strip()
-        if not title:
+        if not title or not ledger_safety.headline_is_kid_safe(title):
             continue
         ts = item.get("providerPublishTime") or time.time()
         out.append({
@@ -7644,7 +7721,7 @@ def draw_input_field(surface, rect, text, placeholder, active):
 
 
 def draw_signin_screen(surface):
-    global signin_user_rect, signin_pw_rect, signin_login_btn, signin_create_btn, signin_guest_btn, signin_google_btn, signin_google_up_btn
+    global signin_user_rect, signin_pw_rect, signin_login_btn, signin_create_btn, signin_guest_btn, signin_google_btn, signin_google_up_btn, signin_forgot_rect
     now = time.time()
     draw_app_background(surface)
     draw_signin_hero(surface, now)
@@ -7658,6 +7735,8 @@ def draw_signin_screen(surface):
                      state.auth_active_field == "username")
 
     draw_text(surface, "Password", font_small_bold, C("GRAY"), 40, 250)
+    fr = draw_text(surface, "Forgot password?", font_small_bold, C("PURPLE"), WIDTH - 40, 250, align="right")
+    signin_forgot_rect = fr.inflate(12, 10)
     signin_pw_rect = pygame.Rect(40, 270, WIDTH - 80, 46)
     draw_input_field(surface, signin_pw_rect, "•" * len(state.login_password_input), "Enter password",
                      state.auth_active_field == "password")
@@ -7700,7 +7779,7 @@ def draw_signin_screen(surface):
     if state.auth_message or google_auth.result["message"]:
         draw_text(surface, state.auth_message or google_auth.result["message"], font_tiny, C("RED"), WIDTH // 2, 574, align="center", max_width=WIDTH - 60)
     draw_ticker_tape(surface, HEIGHT - 78, now)
-    draw_text(surface, "Your account stays on this Mac. Launching Ledger always starts here.",
+    draw_text(surface, "Your account is saved only on this computer.",
               font_tiny, C("LIGHT_GRAY"), WIDTH // 2, HEIGHT - 30, align="center")
 
 
@@ -7729,16 +7808,27 @@ def finish_google_sign_in():
 
 # ---- Account setup: username + password come first, then the trader, then the tutorial ----
 
-account_setup = {"google": None, "field": "user", "user": "", "pw": "", "pw2": "", "error": "", "btns": {}, "opened": 0.0}
+account_setup = {"google": None, "stage": "age", "field": "year", "user": "", "pw": "", "pw2": "", "year": "",
+                 "pin": "", "pin2": "", "consent": False, "error": "", "btns": {}, "opened": 0.0}
+
+SETUP_FIELDS = {"age": ["year"], "parent": ["pin", "pin2"], "account": ["user", "pw", "pw2"]}
+SETUP_LIMITS = {"year": 4, "pin": 4, "pin2": 4, "user": 14, "pw": 25, "pw2": 25}
 
 
 def open_account_setup(google=None, username="", password=""):
     suggested = username
     if google and not suggested:
         suggested = "".join(ch for ch in google.get("name", "") if ch.isalnum() or ch == " ").strip()[:14]
-    account_setup.update(google=google, field="user", user=suggested, pw=password, pw2="", error="", btns={}, opened=time.time())
+    account_setup.update(google=google, stage="age", field="year", user=suggested, pw=password, pw2="", year="",
+                         pin="", pin2="", consent=False, error="", btns={}, opened=time.time())
     state.auth_message = ""
     state.screen_mode = "account_setup"
+
+
+def _setup_is_child():
+    a = account_setup
+    return not ledger_safety.birth_year_problem(a["year"]) and \
+        ledger_safety.age_from_birth_year(a["year"]) < ledger_safety.MIN_AGE_WITHOUT_PARENT
 
 
 def _account_checks():
@@ -7746,18 +7836,63 @@ def _account_checks():
     user = " ".join(a["user"].strip().split())
     taken = bool(user) and _normalize_account_key(user) in _read_accounts().get("accounts", {})
     return [
-        ("Username is 3 to 14 characters", 3 <= len(user) <= 14),
+        ("Username is 3-14 letters and friendly", ledger_safety.username_problem(user) is None),
         ("Username is available", len(user) >= 3 and not taken),
         ("Password is at least 4 characters", len(a["pw"]) >= 4),
         ("Passwords match", bool(a["pw"]) and a["pw"] == a["pw2"]),
     ]
 
 
+def _setup_stage_next():
+    """Validate the current step. Age -> (parent, if under 13) -> account."""
+    a = account_setup
+    if a["stage"] == "age":
+        problem = ledger_safety.birth_year_problem(a["year"])
+        if problem:
+            a["error"] = problem
+            play_sound("error")
+            return
+        a["stage"] = "parent" if _setup_is_child() else "account"
+    elif a["stage"] == "parent":
+        if not ledger_safety.pin_is_valid(a["pin"]):
+            a["error"] = "The Parent PIN needs exactly 4 numbers."
+        elif a["pin"] != a["pin2"]:
+            a["error"] = "The two PINs don't match yet."
+        elif not a["consent"]:
+            a["error"] = "A parent or guardian needs to tick the box."
+        else:
+            a["stage"] = "account"
+        if a["stage"] == "parent":
+            play_sound("error")
+            return
+    else:
+        submit_account_setup()
+        return
+    a["field"] = SETUP_FIELDS[a["stage"]][0]
+    a["error"] = ""
+    a["opened"] = time.time()
+    play_sound("click")
+
+
+def _setup_back():
+    a = account_setup
+    a["error"] = ""
+    if a["stage"] == "account":
+        a["stage"] = "parent" if _setup_is_child() else "age"
+    elif a["stage"] == "parent":
+        a["stage"] = "age"
+    else:
+        state.screen_mode = "signin"
+        return
+    a["field"] = SETUP_FIELDS[a["stage"]][0]
+    play_sound("click")
+
+
 def submit_account_setup():
     a = account_setup
     failed = next((label for label, ok in _account_checks() if not ok), None)
     if failed:
-        a["error"] = {"Username is 3 to 14 characters": "Pick a username with 3 to 14 characters.",
+        a["error"] = {"Username is 3-14 letters and friendly": ledger_safety.username_problem(a["user"]) or "",
                       "Username is available": "That username is taken. Try another one.",
                       "Password is at least 4 characters": "Your password needs at least 4 characters.",
                       "Passwords match": "The two passwords don't match yet."}[failed]
@@ -7769,16 +7904,42 @@ def submit_account_setup():
         play_sound("error")
         return
     state.avatar = look
-    if a["google"]:
-        accounts = _read_accounts()
-        rec = accounts["accounts"].get(_normalize_account_key(state.account_username))
-        if isinstance(rec, dict):
+    accounts = _read_accounts()
+    rec = accounts["accounts"].get(_normalize_account_key(state.account_username))
+    if isinstance(rec, dict):
+        if a["google"]:
             rec["google_sub"] = a["google"]["sub"]
-            _write_accounts(accounts)
+        child = _setup_is_child()
+        rec["parental"] = {
+            "birth_year": int(a["year"]),
+            "pin_hash": ledger_safety.hash_secret(a["pin"]) if child and a["pin"] else "",
+            "consent_at": time.strftime("%Y-%m-%d %H:%M") if child else "",
+            "daily_limit_min": 0,
+        }
+        _write_accounts(accounts)
+        load_parental()
     state.name_input = state.account_username
     state.password_input = ""
     state.avatar_active_field = "nick"
     play_sound("achievement")
+
+
+def _setup_field(surface, btns, key, label, value, hint, masked, y, active, now):
+    draw_text(surface, label, font_small_bold, SG_TEXT, 24, y)
+    box = pygame.Rect(20, y + 22, WIDTH - 40, 52)
+    pygame.draw.rect(surface, SG_PANEL_2 if active else SG_PANEL, box, border_radius=16)
+    pygame.draw.rect(surface, SG_GOLD if active else SG_LINE, box, 2 if active else 1, border_radius=16)
+    shown = ("•" * len(value)) if masked else value
+    if shown:
+        r = draw_text(surface, shown, font_body_bold, SG_TEXT, box.x + 18, box.centery - 10, max_width=box.w - 40)
+    else:
+        r = pygame.Rect(box.x + 18, box.centery - 10, 0, 20)
+        draw_text(surface, hint, font_body, SG_MUTED, box.x + 18, box.centery - 10, max_width=box.w - 40)
+    if active and int(now * 2) % 2 == 0:
+        cx = (r.right + 2) if shown else box.x + 18
+        pygame.draw.line(surface, SG_GOLD, (cx, box.centery - 11), (cx, box.centery + 11), 2)
+    btns["field_" + key] = box
+    return y + 88
 
 
 def draw_account_setup(surface):
@@ -7803,50 +7964,70 @@ def draw_account_setup(surface):
             pygame.draw.line(surface, SG_LINE, (cx + 20, 36), (cx + 100, 36), 2)
 
     y = 96 + int((1 - appear) * 16)
-    draw_text(surface, "Create your account", font_sg_title, SG_TEXT, WIDTH // 2, y, align="center")
-    if a["google"]:
-        sub = f"Signed in with Google as {a['google'].get('name') or 'you'}."
-        sub2 = "Now choose a Ledger username and password."
+    stage = a["stage"]
+    if stage == "age":
+        draw_text(surface, "How old are you?", font_sg_title, SG_TEXT, WIDTH // 2, y, align="center")
+        draw_text(surface, "Type the year you were born.", font_body, SG_MUTED, WIDTH // 2, y + 44, align="center")
+        y = _setup_field(surface, a["btns"], "year", "Birth year", a["year"], "e.g. 2013", False, y + 96,
+                         a["field"] == "year", now)
+        for line in ("We ask so a grown-up can help set things up",
+                     "for younger players. Your age stays on this computer."):
+            draw_text(surface, line, font_small, SG_MUTED, WIDTH // 2, y, align="center")
+            y += 22
+        cta, ok = "Next", len(a["year"]) == 4
+    elif stage == "parent":
+        draw_text(surface, "Grab a grown-up!", font_sg_title, SG_TEXT, WIDTH // 2, y, align="center")
+        draw_text(surface, "Players under 13 set up Ledger with a parent.", font_body, SG_MUTED, WIDTH // 2, y + 44,
+                  align="center", max_width=WIDTH - 40)
+        y += 80
+        for fact in ("Pretend money only. No ads, no chat, nothing to buy.",
+                     "Everything stays saved on this computer.",
+                     "The PIN guards Parent View, time limits and resets."):
+            pygame.draw.circle(surface, SG_GREEN, (32, y + 9), 8)
+            _sg_check(surface, 32, y + 9, 0.45, SG_BG, 2)
+            draw_text(surface, fact, font_small, SG_TEXT, 50, y, max_width=WIDTH - 70)
+            y += 24
+        y += 6
+        y = _setup_field(surface, a["btns"], "pin", "Parent PIN (4 numbers)", a["pin"], "Grown-ups only", True, y,
+                         a["field"] == "pin", now)
+        y = _setup_field(surface, a["btns"], "pin2", "Type the PIN again", a["pin2"], "Same 4 numbers", True, y - 8,
+                         a["field"] == "pin2", now)
+        box = pygame.Rect(20, y - 4, WIDTH - 40, 44)
+        pygame.draw.rect(surface, SG_GOLD if a["consent"] else SG_PANEL_2, pygame.Rect(box.x + 4, box.y + 10, 24, 24), border_radius=7)
+        if a["consent"]:
+            _sg_check(surface, box.x + 16, box.y + 22, 0.6, SG_INK, 3)
+        draw_text(surface, "I'm this player's parent or guardian", font_small_bold, SG_TEXT, box.x + 40, box.y + 4)
+        draw_text(surface, "and I agree to them using Ledger.", font_small, SG_MUTED, box.x + 40, box.y + 23)
+        a["btns"]["consent"] = box
+        y += 50
+        cta, ok = "Next", ledger_safety.pin_is_valid(a["pin"]) and a["pin"] == a["pin2"] and a["consent"]
     else:
-        sub, sub2 = "Choose the username and password", "you'll use to log in."
-    draw_text(surface, sub, font_body, SG_MUTED, WIDTH // 2, y + 44, align="center", max_width=WIDTH - 40)
-    draw_text(surface, sub2, font_body, SG_MUTED, WIDTH // 2, y + 66, align="center", max_width=WIDTH - 40)
-
-    y += 108
-    fields = [("user", "Username", a["user"], "e.g. StockNinja", False),
-              ("pw", "Password", a["pw"], "At least 4 characters", True),
-              ("pw2", "Confirm password", a["pw2"], "Type it again", True)]
-    for key, label, value, hint, masked in fields:
-        draw_text(surface, label, font_small_bold, SG_TEXT, 24, y)
-        box = pygame.Rect(20, y + 22, WIDTH - 40, 52)
-        active = a["field"] == key
-        pygame.draw.rect(surface, SG_PANEL_2 if active else SG_PANEL, box, border_radius=16)
-        pygame.draw.rect(surface, SG_GOLD if active else SG_LINE, box, 2 if active else 1, border_radius=16)
-        shown = ("•" * len(value)) if masked else value
-        if shown:
-            r = draw_text(surface, shown, font_body_bold, SG_TEXT, box.x + 18, box.centery - 10, max_width=box.w - 40)
+        draw_text(surface, "Create your account", font_sg_title, SG_TEXT, WIDTH // 2, y, align="center")
+        if a["google"]:
+            sub = f"Signed in with Google as {a['google'].get('name') or 'you'}."
+            sub2 = "Now choose a Ledger username and password."
         else:
-            r = pygame.Rect(box.x + 18, box.centery - 10, 0, 20)
-            draw_text(surface, hint, font_body, SG_MUTED, box.x + 18, box.centery - 10, max_width=box.w - 40)
-        if active and int(now * 2) % 2 == 0:
-            cx = (r.right + 2) if shown else box.x + 18
-            pygame.draw.line(surface, SG_GOLD, (cx, box.centery - 11), (cx, box.centery + 11), 2)
-        a["btns"]["field_" + key] = box
-        y += 88
-
-    # Live checklist.
-    for label, ok in _account_checks():
-        pygame.draw.circle(surface, SG_GREEN if ok else SG_PANEL_2, (32, y + 9), 9)
-        if ok:
-            _sg_check(surface, 32, y + 9, 0.5, SG_BG, 2)
-        draw_text(surface, label, font_small, SG_TEXT if ok else SG_MUTED, 50, y)
-        y += 26
+            sub, sub2 = "Choose the username and password", "you'll use to log in."
+        draw_text(surface, sub, font_body, SG_MUTED, WIDTH // 2, y + 44, align="center", max_width=WIDTH - 40)
+        draw_text(surface, sub2, font_body, SG_MUTED, WIDTH // 2, y + 66, align="center", max_width=WIDTH - 40)
+        y += 108
+        for key, label, value, hint, masked in (("user", "Username", a["user"], "e.g. StockNinja", False),
+                                                ("pw", "Password", a["pw"], "At least 4 characters", True),
+                                                ("pw2", "Confirm password", a["pw2"], "Type it again", True)):
+            y = _setup_field(surface, a["btns"], key, label, value, hint, masked, y, a["field"] == key, now)
+        # Live checklist.
+        for label, ok in _account_checks():
+            pygame.draw.circle(surface, SG_GREEN if ok else SG_PANEL_2, (32, y + 9), 9)
+            if ok:
+                _sg_check(surface, 32, y + 9, 0.5, SG_BG, 2)
+            draw_text(surface, label, font_small, SG_TEXT if ok else SG_MUTED, 50, y)
+            y += 26
+        cta, ok = "Next: design your trader", all(ok for _, ok in _account_checks())
     if a["error"]:
         draw_text(surface, a["error"], font_small_bold, SG_RED, WIDTH // 2, y + 6, align="center", max_width=WIDTH - 40)
 
-    all_ok = all(ok for _, ok in _account_checks())
-    _sg_button(surface, pygame.Rect(20, HEIGHT - 92, WIDTH - 40, 60), "create", "Next: design your trader",
-               SG_GOLD if all_ok else SG_PANEL_2, SG_INK if all_ok else SG_MUTED, btns=a["btns"])
+    _sg_button(surface, pygame.Rect(20, HEIGHT - 92, WIDTH - 40, 60), "create", cta,
+               SG_GOLD if ok else SG_PANEL_2, SG_INK if ok else SG_MUTED, btns=a["btns"])
 
 
 def handle_account_setup_click(pos):
@@ -7854,10 +8035,13 @@ def handle_account_setup_click(pos):
     for key, rect in a["btns"].items():
         if rect.collidepoint(pos):
             if key == "close":
-                play_sound("click")
-                state.screen_mode = "signin"
+                _setup_back()
             elif key == "create":
-                submit_account_setup()
+                _setup_stage_next()
+            elif key == "consent":
+                a["consent"] = not a["consent"]
+                a["error"] = ""
+                play_sound("click")
             else:
                 a["field"] = key.split("_", 1)[1]
                 a["error"] = ""
@@ -7866,22 +8050,34 @@ def handle_account_setup_click(pos):
 
 def handle_account_setup_key(event):
     a = account_setup
-    order = ["user", "pw", "pw2"]
+    order = SETUP_FIELDS[a["stage"]]
+    if a["field"] not in order:
+        a["field"] = order[0]
     if event.key == pygame.K_TAB:
         a["field"] = order[(order.index(a["field"]) + 1) % len(order)]
     elif event.key == pygame.K_RETURN:
-        if a["field"] != "pw2":
+        if a["field"] != order[-1]:
             a["field"] = order[order.index(a["field"]) + 1]
         else:
-            submit_account_setup()
+            _setup_stage_next()
     elif event.key == pygame.K_ESCAPE:
-        state.screen_mode = "signin"
+        _setup_back()
     else:
-        a[a["field"]] = handle_text_event(event, a[a["field"]], 14 if a["field"] == "user" else 25)
+        value = handle_text_event(event, a[a["field"]], SETUP_LIMITS[a["field"]])
+        if a["field"] in ("year", "pin", "pin2"):
+            value = "".join(ch for ch in value if ch.isdigit())
+        a[a["field"]] = value
         a["error"] = ""
 
 
+signin_forgot_rect = None
+
+
 def handle_signin_click(pos):
+    if signin_forgot_rect and signin_forgot_rect.collidepoint(pos):
+        play_sound("click")
+        open_reset_password()
+        return
     if signin_user_rect and signin_user_rect.collidepoint(pos):
         state.auth_active_field = "username"
         return
@@ -8290,6 +8486,14 @@ def _avatar_randomize():
 def _avatar_continue():
     username = state.name_input.strip() or state.player_name or "StockNinja"
     password = state.password_input.strip()
+    if not ledger_safety.is_kid_safe(str(state.avatar.get("nickname", "") or "")):
+        state.auth_message = "That nickname isn't allowed. Try something friendly!"
+        play_sound("error")
+        return
+    if getattr(state, "avatar_editing", False) and username != state.player_name and ledger_safety.username_problem(username):
+        state.auth_message = ledger_safety.username_problem(username)
+        play_sound("error")
+        return
     if getattr(state, "avatar_editing", False):
         # Editing an existing trader (from the menu) only saves the look and
         # returns to the game. It must never restart onboarding, including for guests.
@@ -13182,7 +13386,7 @@ SOCIAL_REFRESH_SECONDS = 3.0
 
 def _social_of(record):
     social = record.setdefault("social", {})
-    for k in ("friends", "incoming", "outgoing"):
+    for k in ("friends", "incoming", "outgoing", "blocked"):
         if not isinstance(social.get(k), list):
             social[k] = []
     return social
@@ -13191,7 +13395,7 @@ def _social_of(record):
 def _social_rename(accounts, old_key, new_key):
     for rec in accounts.get("accounts", {}).values():
         if isinstance(rec, dict) and isinstance(rec.get("social"), dict):
-            for k in ("friends", "incoming", "outgoing"):
+            for k in ("friends", "incoming", "outgoing", "blocked"):
                 rec["social"][k] = [new_key if x == old_key else x for x in rec["social"].get(k, [])]
 
 
@@ -13202,7 +13406,7 @@ def social_snapshot(force=False):
     c = _social_cache
     if not force and c["user"] == me and c["data"] is not None and now - c["at"] < SOCIAL_REFRESH_SECONDS:
         return c["data"]
-    data = {"friends": [], "incoming": [], "outgoing": []}
+    data = {"friends": [], "incoming": [], "outgoing": [], "blocked": []}
     if me:
         accounts = _read_accounts().get("accounts", {})
         rec = accounts.get(me)
@@ -13215,11 +13419,15 @@ def social_snapshot(force=False):
                     return None
                 prof = other.get("profile", {}) if isinstance(other.get("profile"), dict) else {}
                 eq = prof.get("equipped") if isinstance(prof.get("equipped"), dict) else {}
-                return {"key": key, "name": other.get("username", key), "avatar": prof.get("avatar"),
+                name = str(other.get("username", key))
+                if not ledger_safety.is_kid_safe(name):
+                    name = "Hidden name"  # saved before the username filter existed
+                return {"key": key, "name": name, "avatar": prof.get("avatar"),
                         "trophies": int(prof.get("trophies", 0) or 0), "streak": int(prof.get("win_streak", 0) or 0),
                         "level": int(prof.get("level", 1) or 1), "frame": eq.get("frame"), "title": eq.get("title")}
-            for k in ("friends", "incoming", "outgoing"):
-                data[k] = [x for x in (info(key) for key in social[k]) if x]
+            for k in ("friends", "incoming", "outgoing", "blocked"):
+                keys = social[k] if k == "blocked" else [x for x in social[k] if x not in social["blocked"]]
+                data[k] = [x for x in (info(key) for key in keys) if x]
     c.update(at=now, user=me, data=data)
     return data
 
@@ -13253,6 +13461,14 @@ def send_friend_request(username):
         return
     snap = social_snapshot(force=True)
     display = accounts[target].get("username", name)
+    if any(f["key"] == target for f in snap["blocked"]):
+        show_toast("You blocked this player", "Unblock them under Manage friends first.", "warning")
+        play_sound("error")
+        return
+    if me in _social_of(accounts[target])["blocked"]:
+        show_toast("Can't send a request", "This player isn't taking requests from you.", "warning")
+        play_sound("error")
+        return
     if any(f["key"] == target for f in snap["friends"]):
         show_toast("Already friends", f"{display} is already on your leaderboard.", "warning")
         play_sound("error")
@@ -13350,7 +13566,8 @@ def handle_leaderboard_click(pos):
     for rect, action, key in friend_action_rects:
         if rect.collidepoint(pos):
             {"accept": accept_friend_request, "decline": decline_friend_request,
-             "cancel": cancel_friend_request}[action](key)
+             "cancel": cancel_friend_request, "remove": remove_friend, "block": block_player,
+             "unblock": unblock_player}[action](key)
             return True
     return False
 
@@ -13392,12 +13609,14 @@ def draw_leaderboard_tab(surface):
         for p in snap["incoming"]:
             rect = pygame.Rect(20, y, WIDTH - 40, 58)
             draw_rounded_rect(surface, rect, C("PURPLE_BG"), radius=14, border_color=C("PURPLE"), border_width=1)
-            person_row(rect, p, f"Wants to be friends  •  {p['trophies']} trophies", C("PURPLE"))
-            acc = pygame.Rect(rect.right - 150, rect.y + 12, 74, 34)
-            dec = pygame.Rect(rect.right - 70, rect.y + 12, 58, 34)
+            person_row(rect, p, f"{p['trophies']} trophies", C("PURPLE"))
+            acc = pygame.Rect(rect.right - 196, rect.y + 12, 70, 34)
+            dec = pygame.Rect(rect.right - 120, rect.y + 12, 46, 34)
+            blk = pygame.Rect(rect.right - 68, rect.y + 12, 56, 34)
             draw_button(surface, acc, "Accept", C("GREEN"), (255, 255, 255), font=font_small_bold, radius=10)
             draw_button(surface, dec, "No", C("PANEL_BG"), C("INK"), font=font_small_bold, radius=10)
-            friend_action_rects += [(acc, "accept", p["key"]), (dec, "decline", p["key"])]
+            draw_button(surface, blk, "Block", C("PANEL_BG"), C("RED"), font=font_tiny, radius=10)
+            friend_action_rects += [(acc, "accept", p["key"]), (dec, "decline", p["key"]), (blk, "block", p["key"])]
             y += 66
         y += 6
 
@@ -13444,6 +13663,23 @@ def draw_leaderboard_tab(surface):
     if len(rows) == 1:
         draw_text(surface, "Just you so far. Send a request to a friend above!", font_small, C("LIGHT_GRAY"), WIDTH // 2, y + 6, align="center")
         y += 40
+    if snap["friends"] or snap["blocked"]:
+        y += 10
+        draw_text(surface, "MANAGE FRIENDS", font_tiny, C("GRAY"), 20, y)
+        y += 20
+        for p, actions in [(p, (("Remove", "remove"), ("Block", "block"))) for p in snap["friends"]] + \
+                          [(p, (("Unblock", "unblock"),)) for p in snap["blocked"]]:
+            rect = pygame.Rect(20, y, WIDTH - 40, 52)
+            draw_rounded_rect(surface, rect, C("CARD"), radius=14, border_color=C("BORDER"), border_width=1)
+            person_row(rect, p, "Blocked" if actions[0][1] == "unblock" else "Friend", C("GRAY"))
+            bx = rect.right - 12
+            for label, action in reversed(actions):
+                w = 74 if label == "Unblock" else 64
+                b = pygame.Rect(bx - w, rect.y + 10, w, 32)
+                draw_button(surface, b, label, C("PANEL_BG"), C("RED") if action == "block" else C("INK"), font=font_tiny, radius=10)
+                friend_action_rects.append((b, action, p["key"]))
+                bx -= w + 8
+            y += 60
     clamp_scroll("leaderboard", (y - (CONTENT_TOP - off)) + off)
     surface.set_clip(prev_clip)
 
@@ -13565,6 +13801,14 @@ def draw_settings_tab(surface):
     sound_btn = pygame.Rect(20, y, WIDTH - 40, 44)
     draw_button(surface, sound_btn, f"Sound: {'On' if state.sound_enabled else 'Off'}", C("CARD"), C("INK"), radius=10)
     settings_click_rects["sound"] = sound_btn
+    y += 52
+    half = (WIDTH - 50) // 2
+    cb_btn = pygame.Rect(20, y, half, 44)
+    draw_button(surface, cb_btn, f"Colorblind: {'On' if state.colorblind else 'Off'}", C("CARD"), C("INK"), font=font_small_bold, radius=10)
+    settings_click_rects["colorblind"] = cb_btn
+    rm_btn = pygame.Rect(30 + half, y, half, 44)
+    draw_button(surface, rm_btn, f"Less motion: {'On' if state.reduced_motion else 'Off'}", C("CARD"), C("INK"), font=font_small_bold, radius=10)
+    settings_click_rects["reduced_motion"] = rm_btn
     y += 58
     draw_text(surface, "Change username & password", font_small_bold, C("GRAY"), 20, y)
     y += 18
@@ -13603,9 +13847,102 @@ def draw_settings_tab(surface):
     logout_btn = pygame.Rect(20, y, WIDTH - 40, 42)
     draw_button(surface, logout_btn, "Log Out", C("RED"), C("CARD"), radius=10)
     settings_click_rects["logout"] = logout_btn
-    y += 54
+    y += 62
+
+    if state.logged_in:
+        draw_text(surface, "Your data", font_small_bold, C("GRAY"), 20, y)
+        y += 18
+        draw_text(surface, "Everything Ledger saves stays on this computer.", font_tiny, C("GRAY"), 20, y)
+        y += 22
+        export_btn = pygame.Rect(20, y, WIDTH - 40, 42)
+        draw_button(surface, export_btn, "Download my data", C("PANEL_BG"), C("INK"), radius=10)
+        settings_click_rects["export"] = export_btn
+        y += 50
+        if not state.settings_confirm_delete:
+            del_btn = pygame.Rect(20, y, WIDTH - 40, 42)
+            draw_button(surface, del_btn, "Delete my account", C("CARD"), C("RED"), radius=10)
+            pygame.draw.rect(surface, C("RED"), del_btn, 1, border_radius=10)
+            settings_click_rects["delete"] = del_btn
+            y += 56
+        else:
+            card = pygame.Rect(20, y, WIDTH - 40, 150)
+            draw_rounded_rect(surface, card, C("CARD"), radius=12, border_color=C("RED"), border_width=2)
+            draw_text(surface, "Delete this account forever?", font_body_bold, C("RED"), card.x + 14, card.y + 12)
+            draw_text(surface, "Progress, trader and friends are erased. This can't be undone.", font_tiny, C("GRAY"),
+                      card.x + 14, card.y + 36, max_width=card.w - 28)
+            pw_box = pygame.Rect(card.x + 14, card.y + 58, card.w - 28, 36)
+            draw_rounded_rect(surface, pw_box, C("PANEL_BG"), radius=8, border_color=C("INK") if state.settings_active_field == "delete_pw" else C("BORDER"), border_width=1)
+            draw_text(surface, "*" * len(state.settings_delete_pw) if state.settings_delete_pw else "Type your password...", font_body,
+                      C("INK") if state.settings_delete_pw else C("LIGHT_GRAY"), pw_box.x + 10, pw_box.y + 8)
+            settings_click_rects["delete_pw"] = pw_box
+            bw = (card.w - 38) // 2
+            cancel = pygame.Rect(card.x + 14, card.y + 104, bw, 36)
+            confirm = pygame.Rect(cancel.right + 10, card.y + 104, bw, 36)
+            draw_button(surface, cancel, "Keep it", C("PANEL_BG"), C("INK"), font=font_small_bold, radius=10)
+            draw_button(surface, confirm, "Delete forever", C("RED"), (255, 255, 255), font=font_small_bold, radius=10)
+            settings_click_rects["delete_cancel"] = cancel
+            settings_click_rects["delete_confirm"] = confirm
+            y += 164
+
+    draw_text(surface, "About", font_small_bold, C("GRAY"), 20, y)
+    y += 22
+    about = pygame.Rect(20, y, WIDTH - 40, 88)
+    draw_rounded_rect(surface, about, C("CARD"), radius=10, border_color=C("BORDER"), border_width=1)
+    draw_text(surface, f"Ledger version {VERSION}", font_small_bold, C("INK"), about.x + 14, about.y + 12)
+    if update_info["latest"]:
+        upd = pygame.Rect(about.right - 130, about.y + 8, 116, 30)
+        draw_button(surface, upd, f"Get v{update_info['latest']}", C("PURPLE"), (255, 255, 255), font=font_tiny, radius=8)
+        settings_click_rects["update"] = upd
+    else:
+        draw_text(surface, "Up to date" if UPDATE_URL else "", font_tiny, C("GRAY"), about.right - 14, about.y + 14, align="right")
+    n_err = error_report_count()
+    draw_text(surface, f"Problem reports saved: {n_err}", font_small, C("GRAY"), about.x + 14, about.y + 50)
+    if n_err:
+        show = pygame.Rect(about.right - 90, about.y + 44, 76, 30)
+        draw_button(surface, show, "Show file", C("PANEL_BG"), C("INK"), font=font_tiny, radius=8)
+        settings_click_rects["errors"] = show
+    y += 104
     clamp_scroll("settings", (y - (CONTENT_TOP - off)) + off)
     surface.set_clip(prev_clip)
+
+
+def handle_settings_extra_click(pos):
+    """New settings buttons. Returns True when a click was used."""
+    if not (CONTENT_TOP <= pos[1] <= CONTENT_BOTTOM):
+        return False
+    hit = next((k for k, r in settings_click_rects.items() if r.collidepoint(pos)), None)
+    if hit == "colorblind":
+        state.colorblind = not state.colorblind
+        apply_color_mode()
+    elif hit == "reduced_motion":
+        state.reduced_motion = not state.reduced_motion
+    elif hit == "export":
+        export_my_data()
+        return True
+    elif hit == "delete":
+        state.settings_confirm_delete = True
+        state.settings_delete_pw = ""
+        state.settings_active_field = "delete_pw"
+    elif hit == "delete_pw":
+        state.settings_active_field = "delete_pw"
+        return True
+    elif hit == "delete_cancel":
+        state.settings_confirm_delete = False
+        state.settings_delete_pw = ""
+        state.settings_active_field = None
+    elif hit == "delete_confirm":
+        if delete_current_account(state.settings_delete_pw):
+            play_sound("click")
+        return True
+    elif hit == "update":
+        open_update_download()
+    elif hit == "errors":
+        reveal_error_log()
+    else:
+        return False
+    play_sound("click")
+    save_game()
+    return True
 
 
 def try_save_settings():
@@ -13629,6 +13966,17 @@ def try_save_settings():
     old_key = _normalize_account_key(state.account_username)
     new_key = _normalize_account_key(new_username) if new_username else old_key
 
+    if new_username and new_username != state.account_username:
+        problem = ledger_safety.username_problem(new_username)
+        if problem:
+            show_toast("Can't use that username", problem, "warning")
+            play_sound("error")
+            return
+    if new_password and len(new_password) < 4:
+        show_toast("Password too short", "Use at least 4 characters.", "warning")
+        play_sound("error")
+        return
+
     if new_key != old_key:
         accounts = _migrate_old_save_if_needed(_read_accounts())
         if new_key in accounts["accounts"]:
@@ -13637,7 +13985,7 @@ def try_save_settings():
             return
         record = accounts["accounts"].pop(old_key, None)
         if record is None:
-            record = {"username": state.account_username, "password_hash": _password_hash(state.password) if state.password else ""}
+            record = {"username": state.account_username, "password_hash": _hash_for_current_password() if state.password else ""}
         state.account_username = new_username
         state.player_name = new_username
         record["username"] = new_username
@@ -14521,6 +14869,659 @@ def handle_text_event(event, current, limit):
     return current
 
 
+# ----------------------------
+# PARENT CONTROLS & ACCOUNT SAFETY
+# ----------------------------
+# Everything here stays on this computer. The Parent PIN is scrypt-hashed like passwords.
+
+VERSION = "1.0.0"
+# Set to a URL serving {"latest": "1.0.1", "download": "https://..."} to turn on update checks.
+UPDATE_URL = ""
+TIME_LIMIT_CHOICES = [0, 30, 60, 90, 120]
+
+parental = {}       # this account's parent settings: birth_year, pin_hash, consent_at, daily_limit_min, extra_*
+parent_ui = {"mode": "", "pin": "", "first": "", "msg": "", "btns": {}}   # mode: "" | "set" | "confirm"
+time_up = {"active": False, "asking": False, "pin": "", "msg": "", "btns": {}, "warned_day": ""}
+reset_pw = {"user": "", "pin": "", "pw": "", "pw2": "", "field": "user", "error": "", "btns": {}, "opened": 0.0}
+update_info = {"latest": "", "download": ""}
+_play_clock = {"last": 0.0}
+_ORIGINAL_SG = {}
+
+
+def _account_key():
+    return _normalize_account_key(state.account_username)
+
+
+def _update_record(fn):
+    accounts = _read_accounts()
+    rec = accounts.get("accounts", {}).get(_account_key())
+    if isinstance(rec, dict):
+        fn(rec)
+        _write_accounts(accounts)
+
+
+def load_parental():
+    parental.clear()
+    if getattr(state, "logged_in", False):
+        rec = _read_accounts().get("accounts", {}).get(_account_key())
+        if isinstance(rec, dict) and isinstance(rec.get("parental"), dict):
+            parental.update(rec["parental"])
+
+
+def save_parental():
+    snapshot = dict(parental)
+    _update_record(lambda rec: rec.__setitem__("parental", snapshot))
+
+
+def parent_pin_set():
+    return bool(parental.get("pin_hash"))
+
+
+def check_parent_pin(pin, pin_hash=None, key=None):
+    key = key or _account_key()
+    wait = _pin_limiter.seconds_locked(key)
+    if wait:
+        return False, f"Too many tries. Wait {wait} seconds."
+    ok, _ = ledger_safety.verify_secret(pin, parental.get("pin_hash", "") if pin_hash is None else pin_hash)
+    if ok:
+        _pin_limiter.success(key)
+        return True, ""
+    _pin_limiter.miss(key)
+    return False, "That PIN isn't right."
+
+
+# ---- Daily time limit ----
+
+def _today():
+    return time.strftime("%Y-%m-%d")
+
+
+def track_play_time(now):
+    """Count minutes while a saved account is actually in the game (not in sign-in screens)."""
+    last, _play_clock["last"] = _play_clock["last"], now
+    if not (state.logged_in and state.screen_mode == "playing") or time_up["active"]:
+        return
+    if getattr(state, "play_day", "") != _today():
+        state.play_day, state.play_seconds_today = _today(), 0.0
+    if last:
+        state.play_seconds_today += min(1.0, max(0.0, now - last))  # sleep/lag never counts as play
+    left = minutes_left_today()
+    if left is None:
+        return
+    if left <= 0:
+        time_up.update(active=True, asking=False, pin="", msg="")
+        save_game()
+    elif left <= 5 and time_up["warned_day"] != _today():
+        time_up["warned_day"] = _today()
+        show_toast("5 minutes left today", "Your grown-up set a daily time limit.", "warning")
+
+
+def minutes_left_today():
+    limit = int(parental.get("daily_limit_min", 0) or 0)
+    if not limit:
+        return None
+    extra = int(parental.get("extra_min", 0) or 0) if parental.get("extra_day") == _today() else 0
+    played = state.play_seconds_today / 60 if getattr(state, "play_day", "") == _today() else 0
+    return limit + extra - played
+
+
+def set_time_limit(minutes):
+    parental["daily_limit_min"] = int(minutes)
+    save_parental()
+    play_sound("click")
+
+
+# ---- PIN pad (used by Parent View and the time-up screen) ----
+
+def draw_pin_pad(surface, cx, top, entered, btns, colors):
+    """Four dots and a 3x4 keypad. colors = (text, key face, key text, accent)."""
+    text_col, key_bg, key_fg, accent = colors
+    for i in range(4):
+        x = cx - 45 + i * 30
+        if i < len(entered):
+            pygame.draw.circle(surface, accent, (x, top + 8), 8)
+        else:
+            pygame.draw.circle(surface, text_col, (x, top + 8), 8, 2)
+    keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "del"]
+    kw, kh, gap = 76, 50, 10
+    x0 = cx - (3 * kw + 2 * gap) // 2
+    for i, k in enumerate(keys):
+        if not k:
+            continue
+        r = pygame.Rect(x0 + (i % 3) * (kw + gap), top + 32 + (i // 3) * (kh + gap), kw, kh)
+        hovered = r.collidepoint(pygame.mouse.get_pos())
+        pygame.draw.rect(surface, mix_color(key_bg, accent, 0.15) if hovered else key_bg, r, border_radius=14)
+        draw_text(surface, "Delete" if k == "del" else k, font_small_bold if k == "del" else font_large_med, key_fg,
+                  r.centerx, r.centery - (9 if k == "del" else 13), align="center")
+        btns["pin_" + k] = r
+    return top + 32 + 4 * (kh + gap)
+
+
+def pin_pad_press(btns, pos, current):
+    """Return the new PIN string if a key was hit, else None."""
+    for key, rect in btns.items():
+        if key.startswith("pin_") and rect.collidepoint(pos):
+            k = key[4:]
+            play_sound("click")
+            return current[:-1] if k == "del" else (current + k)[:4]
+    return None
+
+
+def pin_key_press(event, current):
+    if event.key == pygame.K_BACKSPACE:
+        return current[:-1]
+    if event.unicode.isdigit():
+        return (current + event.unicode)[:4]
+    return None
+
+
+# ---- Parent View ----
+
+def _parent_pin_entered(pin):
+    """Called when 4 digits are in: unlock, or step through setting a new PIN."""
+    ui = parent_ui
+    if ui["mode"] == "set":
+        ui.update(mode="confirm", first=pin, pin="", msg="Type the same PIN again.")
+    elif ui["mode"] == "confirm":
+        if pin == ui["first"]:
+            parental["pin_hash"] = ledger_safety.hash_secret(pin)
+            save_parental()
+            state.parent_unlocked = True
+            ui.update(mode="", pin="", first="", msg="")
+            show_toast("Parent PIN saved", "Parent View, time limits and resets are now protected.", "achievement")
+            play_sound("achievement")
+        else:
+            ui.update(mode="set", pin="", first="", msg="Those didn't match. Start again.")
+            play_sound("error")
+    else:
+        ok, msg = check_parent_pin(pin)
+        ui.update(pin="", msg=msg)
+        if ok:
+            state.parent_unlocked = True
+            play_sound("achievement")
+        else:
+            play_sound("error")
+
+
+def _parent_needs_pin():
+    return parent_ui["mode"] in ("set", "confirm") or (parent_pin_set() and not getattr(state, "parent_unlocked", False))
+
+
+def draw_parents_tab(surface):
+    ui = parent_ui
+    ui["btns"] = {}
+    if not getattr(state, "logged_in", False):
+        prev, y = _draw_section_shell(surface, "Parent View", "Parent tools are for saved accounts.")
+        draw_text(surface, "Guest play isn't saved, so there's nothing to manage here.", font_small, C("GRAY"), 20, y,
+                  max_width=WIDTH - 40)
+        surface.set_clip(prev)
+        return
+
+    if _parent_needs_pin():
+        setting = ui["mode"] in ("set", "confirm")
+        prev, y = _draw_section_shell(surface, "Parent View", "Grown-ups only." if not setting else "Choose a 4-number Parent PIN.")
+        title = {"set": "New Parent PIN", "confirm": "Confirm Parent PIN"}.get(ui["mode"], "Enter Parent PIN")
+        draw_text(surface, title, font_medium_bold, C("INK"), WIDTH // 2, y, align="center")
+        if ui["msg"]:
+            draw_text(surface, ui["msg"], font_small_bold, C("RED") if "n't" in ui["msg"] or "Too" in ui["msg"] else C("GRAY"),
+                      WIDTH // 2, y + 26, align="center")
+        y = draw_pin_pad(surface, WIDTH // 2, y + 56, ui["pin"], ui["btns"], (C("GRAY"), C("PANEL_BG"), C("INK"), C("PURPLE")))
+        if setting:
+            cancel = pygame.Rect(WIDTH // 2 - 70, y + 6, 140, 38)
+            draw_button(surface, cancel, "Cancel", C("CARD"), C("INK"), font=font_small_bold, radius=10)
+            ui["btns"]["cancel"] = cancel
+        else:
+            draw_text(surface, "Forgot the PIN? Delete and re-create the account from Settings.", font_tiny, C("GRAY"),
+                      WIDTH // 2, y + 10, align="center", max_width=WIDTH - 40)
+        surface.set_clip(prev)
+        return
+
+    prev, y = _draw_section_shell(surface, "Parent View", "What your trader has practiced. All money here is pretend.")
+    played = int(state.play_seconds_today // 60) if getattr(state, "play_day", "") == _today() else 0
+    by = parental.get("birth_year")
+    done_q = [q[1] for q in QUESTS if q[0] in state.quests_claimed]
+    rows = [
+        ("Played today", f"{played} min"),
+        ("Lessons finished", str(len(state.academy_completed))),
+        ("Learning streak", f"{state.learning_streak} day{'s' if state.learning_streak != 1 else ''}"),
+        ("Trader Path", f"{len(done_q)}/{len(QUESTS)} quests"),
+        ("Trades made", str(state.trade_count)),
+        ("Diversification", f"{diversification_score()}/100"),
+        ("Bot battles", f"{state.total_wins} won of {state.total_duels}"),
+        ("Pretend portfolio", fmt_money(net_worth())),
+    ]
+    for label, val in rows:
+        r = pygame.Rect(20, y, WIDTH - 40, 40)
+        draw_rounded_rect(surface, r, C("CARD"), radius=10, border_color=C("BORDER"), border_width=1)
+        draw_text(surface, label, font_small, C("GRAY"), r.x + 14, r.y + 11)
+        draw_text(surface, val, font_small_bold, C("INK"), r.right - 14, r.y + 11, align="right")
+        y += 46
+
+    # Controls
+    y += 10
+    draw_text(surface, "Daily time limit", font_body_bold, C("INK"), 20, y)
+    left = minutes_left_today()
+    draw_text(surface, "No limit" if left is None else f"{max(0, int(left))} min left today", font_small, C("GRAY"),
+              WIDTH - 20, y + 2, align="right")
+    y += 28
+    cw = (WIDTH - 40 - 4 * 8) // 5
+    current = int(parental.get("daily_limit_min", 0) or 0)
+    for i, mins in enumerate(TIME_LIMIT_CHOICES):
+        r = pygame.Rect(20 + i * (cw + 8), y, cw, 38)
+        on = mins == current
+        draw_button(surface, r, "Off" if not mins else f"{mins}m", C("PURPLE") if on else C("CARD"),
+                    (255, 255, 255) if on else C("INK"), font=font_small_bold, radius=10)
+        if not on:
+            pygame.draw.rect(surface, C("BORDER"), r, 1, border_radius=10)
+        ui["btns"][f"limit_{mins}"] = r
+    y += 46
+    if not parent_pin_set():
+        draw_text(surface, "Set a Parent PIN so your trader can't change the limit.", font_tiny, C("ORANGE"), 20, y,
+                  max_width=WIDTH - 40)
+        y += 20
+    y += 6
+    half = (WIDTH - 50) // 2
+    pin_btn = pygame.Rect(20, y, half, 40)
+    draw_button(surface, pin_btn, "Change PIN" if parent_pin_set() else "Set Parent PIN", C("INK"), C("CARD"),
+                font=font_small_bold, radius=10)
+    ui["btns"]["set_pin"] = pin_btn
+    if parent_pin_set():
+        lock_btn = pygame.Rect(30 + half, y, half, 40)
+        draw_button(surface, lock_btn, "Lock Parent View", C("PANEL_BG"), C("INK"), font=font_small_bold, radius=10)
+        ui["btns"]["lock"] = lock_btn
+    y += 54
+
+    # Privacy
+    draw_text(surface, "Privacy & data", font_body_bold, C("INK"), 20, y)
+    y += 26
+    facts = [
+        f"Age: born {by}." if by else "Age: not asked (account made before age check).",
+        "Stored: username, scrambled password, trader look and game progress.",
+        "Not stored: email, real name, location. Nothing is sent online.",
+        "It all lives only on this computer. Delete it anytime in Settings.",
+    ]
+    for ftxt in facts:
+        for ln in _wrap_words(ftxt, font_small, WIDTH - 60):
+            draw_text(surface, ln, font_small, C("GRAY"), 30, y)
+            y += 19
+        y += 3
+
+    y += 10
+    draw_text(surface, "Talk about it together", font_body_bold, C("INK"), 20, y)
+    y += 28
+    prompts = ["Which stock did you pick, and why?", "What happened the last time a price dropped?",
+               "Why is owning different kinds of companies safer?"]
+    if state.trade_reviews:
+        prompts.insert(0, "Coach said: " + state.trade_reviews[0])
+    for ptxt in prompts:
+        lines = _wrap_words(ptxt, font_small, WIDTH - 72)
+        r = pygame.Rect(20, y, WIDTH - 40, 20 + 18 * len(lines))
+        draw_rounded_rect(surface, r, C("PURPLE_BG"), radius=10)
+        for i, ln in enumerate(lines):
+            draw_text(surface, ln, font_small, C("INK"), r.x + 14, r.y + 10 + i * 18)
+        y += r.h + 8
+    y += 6
+    note = ("No real money, no chat, no ads. Prices are real market quotes." if state.live_mode
+            else "No real money, no chat, no ads. Prices are simulated for learning.")
+    draw_text(surface, note, font_tiny, C("GRAY"), 20, y, max_width=WIDTH - 40)
+    y += 30
+    clamp_scroll("parents", y - CONTENT_TOP + scroll_offset.get("parents", 0))
+    surface.set_clip(prev)
+
+
+def handle_parents_click(pos):
+    ui = parent_ui
+    if not (CONTENT_TOP <= pos[1] <= CONTENT_BOTTOM):
+        return False
+    if _parent_needs_pin():
+        if ui["btns"].get("cancel") and ui["btns"]["cancel"].collidepoint(pos):
+            ui.update(mode="", pin="", first="", msg="")
+            play_sound("click")
+            return True
+        new = pin_pad_press(ui["btns"], pos, ui["pin"])
+        if new is None:
+            return False
+        ui["pin"] = new
+        if len(new) == 4:
+            _parent_pin_entered(new)
+        return True
+    for key, rect in ui["btns"].items():
+        if not rect.collidepoint(pos):
+            continue
+        if key.startswith("limit_"):
+            set_time_limit(int(key.split("_")[1]))
+        elif key == "set_pin":
+            ui.update(mode="set", pin="", first="", msg="")
+            play_sound("click")
+        elif key == "lock":
+            state.parent_unlocked = False
+            play_sound("click")
+        return True
+    return False
+
+
+def handle_parents_key(event):
+    if not _parent_needs_pin():
+        return
+    new = pin_key_press(event, parent_ui["pin"])
+    if new is not None:
+        parent_ui["pin"] = new
+        if len(new) == 4:
+            _parent_pin_entered(new)
+
+
+# ---- Time's up ----
+
+def draw_time_up(surface):
+    t = time_up
+    t["btns"] = {}
+    now = time.time()
+    _sg_background(surface, now)
+    limit = int(parental.get("daily_limit_min", 0) or 0)
+    y = 90
+    draw_crown(surface, WIDTH // 2, y, SG_GOLD)
+    y += 40
+    draw_text(surface, "That's it for today!", font_sg_title, SG_TEXT, WIDTH // 2, y, align="center")
+    draw_text(surface, f"You've played your {limit} minutes. Great work!", font_body, SG_MUTED, WIDTH // 2, y + 46, align="center")
+    draw_text(surface, "Your progress is saved. Come back tomorrow.", font_body, SG_MUTED, WIDTH // 2, y + 70, align="center")
+    y += 120
+    if t["asking"]:
+        draw_text(surface, "Grown-up: enter Parent PIN for 15 more minutes", font_small_bold, SG_TEXT, WIDTH // 2, y, align="center")
+        if t["msg"]:
+            draw_text(surface, t["msg"], font_small_bold, SG_RED, WIDTH // 2, y + 24, align="center")
+        draw_pin_pad(surface, WIDTH // 2, y + 50, t["pin"], t["btns"], (SG_MUTED, SG_PANEL_2, SG_TEXT, SG_GOLD))
+    elif parent_pin_set():
+        _sg_button(surface, pygame.Rect(40, y, WIDTH - 80, 56), "more", "Grown-up: add 15 minutes", SG_PANEL_2, SG_TEXT,
+                   font=font_body_bold, btns=t["btns"])
+    _sg_button(surface, pygame.Rect(20, HEIGHT - 92, WIDTH - 40, 60), "logout", "Log out", SG_GOLD, SG_INK, btns=t["btns"])
+
+
+def _time_up_pin(pin):
+    t = time_up
+    t["pin"] = pin
+    if len(pin) < 4:
+        return
+    ok, msg = check_parent_pin(pin)
+    if ok:
+        today = _today()
+        parental["extra_min"] = (int(parental.get("extra_min", 0) or 0) if parental.get("extra_day") == today else 0) + 15
+        parental["extra_day"] = today
+        save_parental()
+        t.update(active=False, asking=False, pin="", msg="")
+        show_toast("15 more minutes", "Enjoy! A grown-up added extra time.", "achievement")
+        play_sound("achievement")
+    else:
+        t.update(pin="", msg=msg)
+        play_sound("error")
+
+
+def handle_time_up_event(event):
+    t = time_up
+    if event.type == pygame.KEYDOWN and t["asking"]:
+        new = pin_key_press(event, t["pin"])
+        if new is not None:
+            _time_up_pin(new)
+        return
+    if event.type != pygame.MOUSEBUTTONDOWN:
+        return
+    if t["btns"].get("logout") and t["btns"]["logout"].collidepoint(event.pos):
+        t.update(active=False, asking=False, pin="", msg="")
+        logout_account()
+        return
+    if t["btns"].get("more") and t["btns"]["more"].collidepoint(event.pos):
+        t.update(asking=True, pin="", msg="")
+        play_sound("click")
+        return
+    if t["asking"]:
+        new = pin_pad_press(t["btns"], event.pos, t["pin"])
+        if new is not None:
+            _time_up_pin(new)
+
+
+# ---- Forgot password (needs the Parent PIN) ----
+
+def open_reset_password():
+    reset_pw.update(user=state.login_username_input.strip(), pin="", pw="", pw2="", field="user", error="",
+                    btns={}, opened=time.time())
+    if reset_pw["user"]:
+        reset_pw["field"] = "pin"
+    state.screen_mode = "reset_password"
+
+
+def submit_reset_password():
+    r = reset_pw
+    key = _normalize_account_key(r["user"])
+    accounts = _read_accounts()
+    rec = accounts.get("accounts", {}).get(key)
+    if not isinstance(rec, dict):
+        r["error"] = "No account with that username on this computer."
+    elif not (rec.get("parental") or {}).get("pin_hash"):
+        r["error"] = "This account has no Parent PIN, so it can't be reset here."
+    elif len(r["pw"]) < 4:
+        r["error"] = "The new password needs at least 4 characters."
+    elif r["pw"] != r["pw2"]:
+        r["error"] = "The two new passwords don't match."
+    else:
+        ok, msg = check_parent_pin(r["pin"], pin_hash=rec["parental"]["pin_hash"], key="reset:" + key)
+        if not ok:
+            r["error"], r["pin"] = msg, ""
+        else:
+            rec["password_hash"] = _password_hash(r["pw"])
+            _write_accounts(accounts)
+            _login_limiter.success(key)
+            state.login_username_input = rec.get("username", r["user"])
+            state.login_password_input = ""
+            state.auth_active_field = "password"
+            state.screen_mode = "signin"
+            state.auth_message = "Password reset! Log in with the new password."
+            play_sound("achievement")
+            return
+    play_sound("error")
+
+
+def draw_reset_password(surface):
+    r = reset_pw
+    r["btns"] = {}
+    now = time.time()
+    _sg_background(surface, now)
+    _sg_close(surface, pygame.Rect(16, 16, 40, 40), r["btns"])
+    y = 70
+    draw_text(surface, "Reset password", font_sg_title, SG_TEXT, WIDTH // 2, y, align="center")
+    draw_text(surface, "A grown-up's Parent PIN is needed.", font_body, SG_MUTED, WIDTH // 2, y + 44, align="center")
+    y += 90
+    for key, label, hint, masked in (("user", "Username", "Your Ledger username", False),
+                                     ("pin", "Parent PIN", "4 numbers", True),
+                                     ("pw", "New password", "At least 4 characters", True),
+                                     ("pw2", "Confirm new password", "Type it again", True)):
+        y = _setup_field(surface, r["btns"], key, label, r[key], hint, masked, y, r["field"] == key, now)
+    if r["error"]:
+        draw_text(surface, r["error"], font_small_bold, SG_RED, WIDTH // 2, y, align="center", max_width=WIDTH - 40)
+    ok = all(r[k] for k in ("user", "pin", "pw", "pw2"))
+    _sg_button(surface, pygame.Rect(20, HEIGHT - 92, WIDTH - 40, 60), "reset", "Reset password",
+               SG_GOLD if ok else SG_PANEL_2, SG_INK if ok else SG_MUTED, btns=r["btns"])
+
+
+def handle_reset_password_click(pos):
+    r = reset_pw
+    for key, rect in r["btns"].items():
+        if rect.collidepoint(pos):
+            if key == "close":
+                state.screen_mode = "signin"
+                play_sound("click")
+            elif key == "reset":
+                submit_reset_password()
+            else:
+                r["field"] = key.split("_", 1)[1]
+                r["error"] = ""
+            return
+
+
+def handle_reset_password_key(event):
+    r = reset_pw
+    order = ["user", "pin", "pw", "pw2"]
+    if event.key == pygame.K_TAB:
+        r["field"] = order[(order.index(r["field"]) + 1) % len(order)]
+    elif event.key == pygame.K_RETURN:
+        if r["field"] != "pw2":
+            r["field"] = order[order.index(r["field"]) + 1]
+        else:
+            submit_reset_password()
+    elif event.key == pygame.K_ESCAPE:
+        state.screen_mode = "signin"
+    else:
+        limit = {"user": 14, "pin": 4}.get(r["field"], 25)
+        value = handle_text_event(event, r[r["field"]], limit)
+        if r["field"] == "pin":
+            value = "".join(ch for ch in value if ch.isdigit())
+        r[r["field"]] = value
+        r["error"] = ""
+
+
+# ---- Your data: export & delete ----
+
+def export_my_data():
+    """Save a readable copy of this account's data (without password or PIN hashes) to Downloads."""
+    if not state.logged_in:
+        show_toast("Guest mode", "Guests don't have saved data.", "warning")
+        return
+    save_game()
+    rec = _read_accounts().get("accounts", {}).get(_account_key(), {})
+    out = json.loads(json.dumps(rec))
+    out.pop("password_hash", None)
+    out.pop("google_sub", None)
+    if isinstance(out.get("parental"), dict):
+        out["parental"].pop("pin_hash", None)
+    folder = os.path.expanduser("~/Downloads")
+    if not os.path.isdir(folder):
+        folder = os.path.expanduser("~")
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", state.account_username) or "trader"
+    path = os.path.join(folder, f"Ledger-{safe}-data.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"exported_at": time.strftime("%Y-%m-%d %H:%M"), "app_version": VERSION, "account": out}, f, indent=2)
+        show_toast("Data saved", f"{os.path.basename(path)} is in your {os.path.basename(folder)} folder.", "achievement")
+        play_sound("achievement")
+    except OSError:
+        show_toast("Couldn't save", "Ledger couldn't write to your Downloads folder.", "warning")
+        play_sound("error")
+
+
+def delete_current_account(password):
+    accounts = _read_accounts()
+    key = _account_key()
+    rec = accounts.get("accounts", {}).get(key)
+    if not isinstance(rec, dict):
+        return False
+    stored = rec.get("password_hash", "")
+    if stored and not ledger_safety.verify_secret(password, stored)[0]:
+        show_toast("Incorrect password", "Type your password to delete the account.", "warning")
+        play_sound("error")
+        return False
+    accounts["accounts"].pop(key, None)
+    for other in accounts["accounts"].values():
+        if isinstance(other, dict) and isinstance(other.get("social"), dict):
+            for k in ("friends", "incoming", "outgoing", "blocked"):
+                other["social"][k] = [x for x in other["social"].get(k, []) if x != key]
+    if accounts.get("last_user") and _normalize_account_key(str(accounts["last_user"])) == key:
+        accounts.pop("last_user", None)
+    _write_accounts(accounts)
+    _reset_to_fresh_state()
+    parental.clear()
+    state.screen_mode = "signin"
+    state.auth_message = "Account deleted. Its data was removed from this computer."
+    return True
+
+
+# ---- Settings extras: accessibility, data, about ----
+
+def apply_color_mode():
+    """Colorblind-friendly mode swaps green/red for blue/orange (Okabe-Ito colors) everywhere."""
+    global SG_GREEN, SG_RED
+    if not _ORIGINAL_SG:
+        _ORIGINAL_SG.update(green=SG_GREEN, red=SG_RED)
+    cb = getattr(state, "colorblind", False)
+    SG_GREEN = (86, 180, 233) if cb else _ORIGINAL_SG["green"]
+    SG_RED = (230, 159, 0) if cb else _ORIGINAL_SG["red"]
+
+
+def error_report_count():
+    try:
+        with open(os.path.join(_DATA_DIR, "ledger_ui_errors.log"), encoding="utf-8") as f:
+            return sum(1 for line in f if re.match(r"\d{4}-\d{2}-\d{2} \d", line))
+    except OSError:
+        return 0
+
+
+def reveal_error_log():
+    path = os.path.join(_DATA_DIR, "ledger_ui_errors.log")
+    target = path if os.path.exists(path) else _DATA_DIR
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", target])
+        elif sys.platform.startswith("win"):
+            subprocess.Popen(["explorer", "/select,", target])
+        else:
+            subprocess.Popen(["xdg-open", os.path.dirname(target)])
+    except OSError:
+        show_toast("Error file", target, "neutral")
+
+
+def _version_tuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "0"))
+
+
+def _update_check_worker():
+    try:
+        data = _live_json(UPDATE_URL, timeout=6)
+        latest = str(data.get("latest", ""))
+        if _version_tuple(latest) > _version_tuple(VERSION):
+            update_info.update(latest=latest, download=str(data.get("download", "")))
+    except Exception:
+        pass
+
+
+def start_update_check():
+    if UPDATE_URL:
+        threading.Thread(target=_update_check_worker, daemon=True).start()
+
+
+def open_update_download():
+    if update_info["download"].startswith("https://"):
+        import webbrowser
+        webbrowser.open(update_info["download"])
+
+
+# ---- Friends: blocking ----
+
+def block_player(key):
+    me = _account_key()
+
+    def apply(accts):
+        if me in accts:
+            mine = _social_of(accts[me])
+            if key not in mine["blocked"]:
+                mine["blocked"].append(key)
+        for a, b in ((me, key), (key, me)):
+            if a in accts:
+                soc = _social_of(accts[a])
+                for k in ("friends", "incoming", "outgoing"):
+                    soc[k] = [x for x in soc[k] if x != b]
+    _social_update(apply)
+    show_toast("Player blocked", "They can't send you requests or see you on their board.", "neutral")
+    play_sound("click")
+
+
+def unblock_player(key):
+    me = _account_key()
+
+    def apply(accts):
+        if me in accts:
+            soc = _social_of(accts[me])
+            soc["blocked"] = [x for x in soc["blocked"] if x != key]
+    _social_update(apply)
+    play_sound("click")
+
+
 # -----------------------------------------------------------------------------
 # NAVIGATION HARDENING
 # -----------------------------------------------------------------------------
@@ -14726,46 +15727,6 @@ def draw_why_card(surface, y):
         draw_text(surface, ln, font_small if i < n_reason else font_tiny, C("INK") if i < n_reason else C("GRAY"), card.x + 14, ly)
         ly += 18
     return card.bottom + 14
-
-
-def draw_parents_tab(surface):
-    prev, y = _draw_section_shell(surface, "Parent View", "What your trader has practiced. All money here is pretend.")
-    done_q = [q[1] for q in QUESTS if q[0] in state.quests_claimed]
-    rows = [
-        ("Lessons finished", str(len(state.academy_completed))),
-        ("Learning streak", f"{state.learning_streak} day{'s' if state.learning_streak != 1 else ''}"),
-        ("Trader Path", f"{len(done_q)}/{len(QUESTS)} quests"),
-        ("Trades made", str(state.trade_count)),
-        ("Diversification", f"{diversification_score()}/100"),
-        ("Bot battles", f"{state.total_wins} won of {state.total_duels}"),
-        ("League", f"{league_tier()[0]}"),
-        ("Pretend portfolio", fmt_money(net_worth())),
-    ]
-    for label, val in rows:
-        r = pygame.Rect(20, y, WIDTH - 40, 44)
-        draw_rounded_rect(surface, r, C("CARD"), radius=10, border_color=C("BORDER"), border_width=1)
-        draw_text(surface, label, font_small, C("GRAY"), r.x + 14, r.y + 13)
-        draw_text(surface, val, font_small_bold, C("INK"), r.right - 14, r.y + 13, align="right")
-        y += 50
-    y += 6
-    draw_text(surface, "Talk about it together", font_body_bold, C("INK"), 20, y)
-    y += 28
-    prompts = ["Which stock did you pick, and why?", "What happened the last time a price dropped?",
-               "Why is owning different kinds of companies safer?"]
-    if state.trade_reviews:
-        prompts.insert(0, "Coach said: " + state.trade_reviews[0])
-    for ptxt in prompts:
-        lines = _wrap_words(ptxt, font_small, WIDTH - 72)
-        r = pygame.Rect(20, y, WIDTH - 40, 20 + 18 * len(lines))
-        draw_rounded_rect(surface, r, C("PURPLE_BG"), radius=10)
-        for i, ln in enumerate(lines):
-            draw_text(surface, ln, font_small, C("INK"), r.x + 14, r.y + 10 + i * 18)
-        y += r.h + 8
-    y += 6
-    draw_text(surface, "No real money, no chat, no ads. Prices are simulated for learning.", font_tiny, C("GRAY"), 20, y, max_width=WIDTH - 40)
-    y += 30
-    clamp_scroll("parents", y - CONTENT_TOP + scroll_offset.get("parents", 0))
-    surface.set_clip(prev)
 
 
 def draw_challenges_tab(surface):
@@ -15417,7 +16378,9 @@ def _main_loop():
     running = True
     while running:
         now = time.time()
-        if state.screen_mode == "playing":
+        track_play_time(now)
+        apply_color_mode()
+        if state.screen_mode == "playing" and not time_up["active"]:
             # Login/tutorial completion resets last_tick to 0, so this runs immediately.
             # The renderer runs at 60 FPS, while market data is allowed to be
             # applied four times per second. This makes login/quote arrival feel
@@ -15478,6 +16441,8 @@ def _main_loop():
                         safe_button_action("google form button", lambda: handle_google_form_click(event.pos))
                     elif state.screen_mode == "account_setup":
                         safe_button_action("account setup", lambda: handle_account_setup_click(event.pos))
+                    elif state.screen_mode == "reset_password":
+                        safe_button_action("reset password", lambda: handle_reset_password_click(event.pos))
                     elif state.screen_mode == "avatar":
                         safe_button_action("avatar button", lambda: handle_avatar_click(event.pos))
                     elif state.screen_mode == "tutorial":
@@ -15506,9 +16471,14 @@ def _main_loop():
                         state.name_input = handle_text_event(event, state.name_input, 14)
                 elif event.type == pygame.KEYDOWN and state.screen_mode == "account_setup":
                     handle_account_setup_key(event)
+                elif event.type == pygame.KEYDOWN and state.screen_mode == "reset_password":
+                    handle_reset_password_key(event)
                 elif event.type == pygame.KEYDOWN and state.screen_mode == "google_form":
                     field = "name_input" if state.google_active_field == "name" else "email_input"
                     setattr(state, field, handle_text_event(event, getattr(state, field), 30))
+
+            elif time_up["active"]:
+                safe_button_action("time limit", lambda: handle_time_up_event(event))
 
             elif tour["active"] and event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEWHEEL, pygame.KEYDOWN, pygame.TEXTINPUT):
                 safe_button_action("tour", lambda: handle_tour_event(event))
@@ -15624,6 +16594,8 @@ def _main_loop():
                 if state.tab == "academy":
                     safe_button_action("academy button", lambda: handle_academy_click(pos))
                 elif state.tab == "settings":
+                    if safe_button_action("settings extras", lambda: handle_settings_extra_click(pos)):
+                        continue
                     if settings_click_rects.get("theme") and settings_click_rects["theme"].collidepoint(pos):
                         state.dark_mode = not state.dark_mode
                         play_sound("click")
@@ -15650,6 +16622,9 @@ def _main_loop():
                         play_sound("click")
                 elif state.tab == "leaderboard":
                     if safe_button_action("friends button", lambda: handle_leaderboard_click(pos)):
+                        continue
+                elif state.tab == "parents":
+                    if safe_button_action("parent view", lambda: handle_parents_click(pos)):
                         continue
                 elif state.tab == "rewards":
                     if safe_button_action("rewards button", lambda: handle_rewards_click(pos)):
@@ -15745,6 +16720,8 @@ def _main_loop():
                     state.friend_input_text = handle_text_event(event, state.friend_input_text, 18)
                     if event.key == pygame.K_RETURN:
                         send_friend_request(state.friend_input_text)
+                elif state.tab == "parents":
+                    handle_parents_key(event)
                 elif state.tab == "settings" and state.settings_active_field:
                     attr = f"settings_{state.settings_active_field}"
                     setattr(state, attr, handle_text_event(event, getattr(state, attr), 25))
@@ -15753,6 +16730,8 @@ def _main_loop():
             draw_signin_screen(screen)
         elif state.screen_mode == "google_form":
             draw_google_form_screen(screen)
+        elif state.screen_mode == "reset_password":
+            draw_reset_password(screen)
         elif state.screen_mode == "account_setup":
             draw_account_setup(screen)
             for p in particles:
@@ -15790,6 +16769,8 @@ def _main_loop():
             elif not tour["active"] and state.tutorial_completed and getattr(state, "last_free_chest_day", "") != time.strftime("%Y-%m-%d"):
                 maybe_grant_free_daily_chest()
             draw_tour(screen)
+            if time_up["active"]:
+                draw_time_up(screen)
             if time.time() < last_ui_error_until:
                 err = pygame.Rect(18, 74, WIDTH - 36, 34)
                 draw_rounded_rect(screen, err, C("RED"), radius=10)
@@ -15820,6 +16801,7 @@ def main():
     and returns to a safe screen instead of kicking the player out.
     """
     global menu_open, modal_stock, detail_modal_stock
+    start_update_check()
     while True:
         try:
             _main_loop()
