@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Game data (save files & logs — keep accounts in git if you want)
+data/ledger_save.json
+data/ledger_ui_errors.log
+
+# macOS
+.DS_Store
+google_config.json
+
+# Local player data & secrets — never commit
+data/
+google_config.json
+client_secret*.json
+
+# Build output / env / local backups
+venv/
+build/
+dist/
+*.bak
+*.pre_*
