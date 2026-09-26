@@ -3910,6 +3910,8 @@ def do_sell(stock, qty, via=None):
     owned = state.holdings.get(stock["ticker"], 0)
     if qty <= 0:
         return False
+    if owned < qty < owned + 1e-4:
+        qty = owned  # rounding dust: selling "all" of 2.9999999 shares must not be refused
     if qty > owned:
         show_toast("You don't own that many", f"You only have {owned:g} share{'s' if owned != 1 else ''}", "warning")
         play_sound("error")
@@ -14585,6 +14587,16 @@ def draw_detail_modal(surface):
 modal_reason = None
 
 
+def sell_qty(q, owned):
+    """A sell amount that never exceeds what you own. Rounds down (never up) to 4 decimals,
+    and "all" stays exactly the amount owned, even for tiny fractional holdings."""
+    if owned <= 0:
+        return 0.0
+    if q >= owned - 1e-9:
+        return owned
+    return max(min(0.01, owned), math.floor(q * 10000) / 10000)
+
+
 def open_modal(stock, mode):
     global modal_stock, modal_mode, modal_qty, qty_input_text, modal_reason
     modal_stock = stock
@@ -14597,7 +14609,7 @@ def open_modal(stock, mode):
         # One whole share costs more than you have: start with the fraction you can afford.
         modal_qty = max(0.01, math.floor(state.cash / price * 100) / 100)
     elif mode == "sell":
-        modal_qty = max(0.01, min(1.0, state.holdings.get(stock["ticker"], 0)) or 0.01)
+        modal_qty = sell_qty(1.0, state.holdings.get(stock["ticker"], 0))
     qty_input_text = f"{modal_qty:g}"
 
 
@@ -14619,7 +14631,7 @@ def _trade_limits():
 def _trade_can_confirm():
     owned, max_buy = _trade_limits()
     total = modal_stock["price"] * modal_qty
-    if modal_qty < 0.01:
+    if modal_qty <= 0 or (modal_qty < 0.01 and modal_mode == "buy"):
         return False, "Pick how many shares"
     if modal_mode == "buy":
         return (total <= state.cash + 0.005), "Not enough cash for that many"
@@ -14817,7 +14829,7 @@ def handle_modal_click(pos):
 
     def set_qty(q):
         global modal_qty, qty_input_text
-        modal_qty = max(0.01, round(q, 2))
+        modal_qty = sell_qty(q, owned) if modal_mode == "sell" else max(0.01, round(q, 2))
         qty_input_text = f"{modal_qty:g}"
         play_sound("click")
 
