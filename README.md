@@ -1,5 +1,7 @@
 # Ledger: learn investing with pretend money
 
+[![tests](https://github.com/rohincodes15-websites/Ledger-Stock-Market/actions/workflows/tests.yml/badge.svg)](https://github.com/rohincodes15-websites/Ledger-Stock-Market/actions/workflows/tests.yml)
+
 **Ledger is a desktop game that teaches kids and teens how the stock market works, like Robinhood
 with $1,000 of pretend cash.** Players trade a simulated market, take bite-sized lessons, spot scams,
 and race trading bots. There's no real money, no ads, no chat and nothing to buy.
@@ -52,7 +54,7 @@ and race trading bots. There's no real money, no ads, no chat and nothing to buy
 ## Run it
 
 ```sh
-git clone <this repo> && cd Ledger
+git clone https://github.com/rohincodes15-websites/Ledger-Stock-Market.git && cd Ledger-Stock-Market
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 ./venv/bin/python ledger_game.py
