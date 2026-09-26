@@ -2324,7 +2324,7 @@ class GameState:
     def __init__(self):
         self.player_name = "StockNinja"
         self.password = ""
-        self.dark_mode = False
+        self.dark_mode = True   # the whole game uses the night palette so every screen matches
         self.avatar = dict(DEFAULT_CHARACTER)
         self.xp = 0
         self.level = 1
@@ -2592,7 +2592,7 @@ def _normalize_account_key(username):
 
 def _load_profile_data(data):
     """Restore one account's profile into the current GameState."""
-    for key in ("player_name", "dark_mode", "avatar", "xp", "level", "trophies",
+    for key in ("player_name", "avatar", "xp", "level", "trophies",
                 "win_streak", "total_wins", "total_duels", "highest_bot_beaten", "cash",
                 "holdings", "avg_buy_price", "realized_pnl", "hold_since", "total_dividends", "friends",
                 "alerts", "pending_orders", "recurring_orders", "learning_streak", "last_learning_day",
@@ -5858,7 +5858,7 @@ def draw_inventory_tab(surface):
     prev = surface.get_clip()
     surface.set_clip(clip)
     y = CONTENT_TOP - off
-    draw_text(surface, "Inventory", font_large_med, C("INK"), 20, y)
+    draw_text(surface, "Inventory", font_sg_h2, C("INK"), 20, y)
     draw_text(surface, "Use your boosts and equip what you like", font_small, C("GRAY"), 20, y + 25)
     y += 56
     tabs = [("all", "All"), ("boosts", "Boosts"), ("frame", "Frames"), ("title", "Titles"), ("chart", "Charts"), ("fx", "Effects")]
@@ -6798,6 +6798,9 @@ def draw_ticker_badge(surface, ticker, x, y, size=40):
 
 def draw_button(surface, rect, label, bg_color, text_color, font=font_body_bold, radius=10):
     rect = pygame.Rect(rect)
+    if tuple(bg_color[:3]) == THEMES["dark"]["INK"]:
+        # A white "primary" button becomes the game's gold call-to-action, like the Market and Learn screens.
+        bg_color, text_color = SG_GOLD, SG_INK
     mouse = pygame.mouse.get_pos()
     hovered = rect.collidepoint(mouse) and state.screen_mode in ("signin", "google_form", "avatar", "tutorial", "playing")
     pressed = hovered and pygame.mouse.get_pressed()[0]
@@ -9362,7 +9365,7 @@ def draw_header(surface):
 
 
 TAB_BAR_HEIGHT = 62
-CONTENT_TOP = 202
+CONTENT_TOP = 76   # every tab sits under the slim game HUD (same as GAME_TOP)
 CONTENT_BOTTOM = HEIGHT - TAB_BAR_HEIGHT
 
 market_row_rects = []
@@ -9402,51 +9405,256 @@ def select_asset_for_trade(asset):
 
 home_action_rects={}
 
+home_anim = {"enter": 0.0, "last": 0.0}
+home_hero_rect = None
+home_chart_rect = None
+# Colors are looked up at draw time (the SG_ palette is defined further down and colorblind mode swaps it).
+HOME_ACTIONS = [("market", "Market", "SG_CYAN"), ("academy", "Learn", "SG_PURPLE"), ("news", "News", "SG_AMBER"),
+                ("portfolio", "Portfolio", "SG_GREEN")]
+
+
+def _home_greeting():
+    h = time.localtime().tm_hour
+    return "Good morning," if h < 12 else ("Good afternoon," if h < 18 else "Good evening,")
+
+
+def _home_rise(i, now):
+    """Staggered entrance: section i slides up into place when Home opens."""
+    if getattr(state, "reduced_motion", False):
+        return 0
+    t = (now - home_anim["enter"] - i * 0.06) / 0.42
+    return int((1 - ease_out_cubic(max(0.0, min(1.0, t)))) * 22)
+
+
+def _home_hero(surface, card, now):
+    """Portfolio hero: glow, drifting sparks, a shimmer sweep, count-up value and a live sparkline."""
+    base = (27, 24, 56)
+    pygame.draw.rect(surface, base, card, border_radius=22)
+    daily = portfolio_daily_pnl()
+    nw = net_worth()
+    up_all = nw >= STARTING_CASH
+    glow_col = SG_GREEN if daily >= 0 else SG_RED
+    surface.blit(_hero_glow(card.size, [((*glow_col, 46), (card.w - 50, 26), 84), ((*SG_PURPLE, 54), (36, card.h), 74)], 18),
+                 card.topleft)
+    calm = getattr(state, "reduced_motion", False)
+    prev = surface.get_clip()
+    surface.set_clip(card.inflate(-4, -4).clip(prev) if prev else card.inflate(-4, -4))
+    if not calm:
+        # Tiny sparks drifting upward, like bubbles in a soda.
+        for k in range(9):
+            span = card.h - 20
+            yy = card.bottom - 10 - ((now * (10 + k % 3 * 4) + k * 41) % span)
+            xx = card.x + 20 + (k * 67 + int(math.sin(now * 0.8 + k) * 8)) % (card.w - 40)
+            fade = min(1.0, (card.bottom - 10 - yy) / 40, (yy - card.y) / 40)
+            pygame.draw.circle(surface, mix_color(base, glow_col, 0.35 * max(0.0, fade)), (xx, yy), 2 + k % 2)
+        # A soft light sweep every 7 seconds.
+        t = (now % 7.0) / 1.4
+        if t < 1.0:
+            sx = card.x - 80 + t * (card.w + 160)
+            pygame.draw.polygon(surface, mix_color(base, (255, 255, 255), 0.05),
+                                [(sx, card.y), (sx + 46, card.y), (sx - 14, card.bottom), (sx - 60, card.bottom)])
+    surface.set_clip(prev)
+    pygame.draw.rect(surface, SG_LINE, card, 1, border_radius=22)
+
+    pulse = 0.5 + 0.5 * math.sin(now * 3)
+    pygame.draw.circle(surface, mix_color(SG_BG, SG_GREEN, 0.4 + 0.6 * pulse), (card.x + 22, card.y + 22), 4)
+    draw_text(surface, "PORTFOLIO VALUE", font_tiny, SG_GOLD, card.x + 34, card.y + 15)
+    draw_text(surface, fmt_money(tween("header_net_worth", nw, 7.0)), font_large, SG_TEXT, card.x + 18, card.y + 34)
+    col = SG_GREEN if daily >= 0 else SG_RED
+    chip_t = f"Today {'+' if daily >= 0 else '-'}{fmt_money(abs(daily))}"
+    cw = font_tiny.size(chip_t)[0] + 20
+    chip = pygame.Rect(card.x + 18, card.y + 84, cw, 24)
+    pygame.draw.rect(surface, mix_color(col, base, 0.78), chip, border_radius=12)
+    draw_text(surface, chip_t, font_tiny, col, chip.centerx, chip.y + 4, align="center")
+    all_pct = (nw - STARTING_CASH) / STARTING_CASH * 100
+    all_t = f"{'+' if up_all else ''}{all_pct:.1f}% since start"
+    draw_text(surface, all_t, font_tiny, SG_GREEN if up_all else SG_RED, chip.right + 10, chip.y + 4)
+    draw_text(surface, f"Cash {fmt_money(state.cash)}", font_tiny, SG_MUTED, card.right - 18, card.y + 18, align="right")
+
+    global home_chart_rect
+    home_chart_rect = pygame.Rect(card.x + 12, card.y + 116, card.w - 24, card.h - 126)
+    hist = state.net_worth_history[-60:] if len(state.net_worth_history) > 1 else [STARTING_CASH, nw]
+    draw_mini_chart(surface, hist, up_all, home_chart_rect.x + 6, home_chart_rect.y + 4, home_chart_rect.w - 12,
+                    home_chart_rect.h - 8, color=SG_GREEN if up_all else SG_RED, baseline=STARTING_CASH,
+                    anim_key=("home", "nw"))
+
+
 def draw_home_tab(surface):
-    global home_action_rects
-    home_action_rects={}
-    off=scroll_offset["home"]; clip=pygame.Rect(0,CONTENT_TOP,WIDTH,CONTENT_BOTTOM-CONTENT_TOP); prev=surface.get_clip(); surface.set_clip(clip)
-    y=CONTENT_TOP-off
-    draw_text(surface,"Good morning,",font_small,C("GRAY"),20,y)
-    draw_text(surface,state.player_name,font_large_med,C("INK"),20,y+18)
-    y+=62
-    daily=portfolio_daily_pnl(); hero=pygame.Rect(20,y,WIDTH-40,126); draw_rounded_rect(surface,hero,(30,27,52) if state.dark_mode else C("INK"),radius=18)
-    draw_text(surface,"PORTFOLIO VALUE",font_tiny,(170,165,190),hero.x+18,hero.y+16)
-    draw_text(surface,fmt_money(tween("header_net_worth",net_worth(),7.0)),font_large,(255,255,255),hero.x+18,hero.y+36)
-    draw_text(surface,f"Today  {'+' if daily>=0 else '-'}{fmt_money(abs(daily))}",font_small_bold,C("GREEN") if daily>=0 else C("RED"),hero.x+18,hero.y+82)
-    draw_text(surface,f"Level {state.level}  •  {state.trophies} trophies",font_tiny,(170,165,190),hero.right-16,hero.y+88,align="right")
-    y+=142; draw_text(surface,"Quick actions",font_body_bold,C("INK"),20,y); y+=28
-    actions=[("market","Market"),("academy","Learn"),("news","News"),("portfolio","Portfolio")]; gap=8; w=(WIDTH-40-gap*3)/4
-    for i,(key,label) in enumerate(actions):
-        r=pygame.Rect(int(20+i*(w+gap)),y,int(w),62); draw_rounded_rect(surface,r,C("CARD"),radius=12,border_color=C("BORDER"),border_width=1)
-        draw_tab_icon(surface,key,r.centerx,r.y+23,C("PURPLE")); draw_text(surface,label,font_tiny,C("INK"),r.centerx,r.y+38,align="center",max_width=r.w-8); home_action_rects[key]=r
-    y+=78; draw_text(surface,"Your watchlist",font_body_bold,C("INK"),20,y); draw_text(surface,"Tap to research",font_tiny,C("GRAY"),WIDTH-20,y+4,align="right"); y+=24
-    watch=state.watchlist[:4] if state.watchlist else ["AAPL","MSFT","NVDA","AMZN"]
+    global home_action_rects, home_hero_rect
+    home_action_rects = {}
+    now = time.time()
+    if now - home_anim["last"] > 0.4:
+        home_anim["enter"] = now   # Home was just opened: replay the entrance
+    home_anim["last"] = now
+    mouse = pygame.mouse.get_pos()
+    off = scroll_offset["home"]
+    clip = pygame.Rect(0, GAME_TOP, WIDTH, CONTENT_BOTTOM - GAME_TOP)
+    prev = surface.get_clip()
+    surface.set_clip(clip)
+    y0 = GAME_TOP + 6 - off
+    y = y0
+
+    # Greeting + login streak.
+    r = _home_rise(0, now)
+    draw_text(surface, _home_greeting(), font_small, SG_MUTED, 20, y + r)
+    draw_text(surface, state.player_name, font_sg_h2, SG_TEXT, 20, y + 18 + r, max_width=WIDTH - 150)
+    streak = int(getattr(state, "login_streak", 0) or 0)
+    st_t = f"{streak} day streak"
+    sw = font_tiny.size(st_t)[0] + 40
+    pill = pygame.Rect(WIDTH - 20 - sw, y + 20 + r, sw, 28)
+    pygame.draw.rect(surface, mix_color(SG_AMBER, SG_BG, 0.82), pill, border_radius=14)
+    draw_flame(surface, pill.x + 16, pill.centery, 0.9, lit=streak > 0)
+    draw_text(surface, st_t, font_tiny, SG_AMBER, pill.x + 28, pill.y + 6)
+    y += 60
+
+    # Hero.
+    home_hero_rect = pygame.Rect(20, y + _home_rise(1, now), WIDTH - 40, 196)
+    _home_hero(surface, home_hero_rect, now)
+    home_action_rects["portfolio_hero"] = home_hero_rect
+    y += 196 + 16
+
+    # Quick actions.
+    r = _home_rise(2, now)
+    gap = 10
+    w = (WIDTH - 40 - gap * 3) // 4
+    for i, (key, label, col_name) in enumerate(HOME_ACTIONS):
+        col = globals()[col_name]
+        tile = pygame.Rect(20 + i * (w + gap), y + r, w, 78)
+        hov = tile.collidepoint(mouse) and clip.collidepoint(mouse)
+        lift = int(tween(("home_tile", key), 3.0 if hov else 0.0, 14))
+        face = tile.move(0, -lift)
+        sg_panel(surface, face, 18, color=SG_PANEL_2 if hov else SG_PANEL)
+        pygame.draw.circle(surface, mix_color(col, SG_PANEL, 0.75), (face.centerx, face.y + 28), 18)
+        draw_tab_icon(surface, key, face.centerx, face.y + 28, col)
+        draw_text(surface, label, font_tiny, SG_TEXT, face.centerx, face.y + 52, align="center", max_width=face.w - 8)
+        badge = notification_counts().get(key, 0)
+        if badge:
+            draw_count_badge(surface, face.right - 12, face.y + 10, badge)
+        home_action_rects[key] = tile
+    y += 78 + 18
+
+    # Today's mission.
+    r = _home_rise(3, now)
+    c = current_challenge()
+    done = state.challenge_progress >= c["goal"]
+    card = pygame.Rect(20, y + r, WIDTH - 40, 104)
+    sg_panel(surface, card, 20)
+    pygame.draw.rect(surface, SG_GOLD if done and not state.challenge_claimed else SG_LINE, card, 2 if done else 1, border_radius=20)
+    draw_text(surface, "TODAY'S MISSION", font_tiny, SG_GOLD, card.x + 18, card.y + 14)
+    draw_text(surface, f"+{c['reward']} XP", font_tiny, SG_PURPLE, card.right - 18, card.y + 14, align="right")
+    draw_text(surface, c["title"], font_body_bold, SG_TEXT, card.x + 18, card.y + 32, max_width=card.w - 150)
+    draw_text(surface, c["desc"], font_tiny, SG_MUTED, card.x + 18, card.y + 54, max_width=card.w - 150)
+    bar = pygame.Rect(card.x + 18, card.bottom - 22, card.w - 150, 8)
+    pygame.draw.rect(surface, SG_PANEL_2, bar, border_radius=4)
+    frac = tween("home_mission", min(1.0, state.challenge_progress / max(1, c["goal"])), 5)
+    if frac > 0.01:
+        pygame.draw.rect(surface, SG_GOLD, (bar.x, bar.y, max(8, int(bar.w * frac)), bar.h), border_radius=4)
+    btn = pygame.Rect(card.right - 116, card.y + 40, 98, 40)
+    if state.challenge_claimed:
+        draw_check(surface, (btn.centerx, btn.centery), 16, SG_GREEN, SG_BG)
+    elif done:
+        glow = 0.5 + 0.5 * math.sin(now * 5)
+        _sg_button(surface, btn, "claim", "Claim", mix_color(SG_GOLD, (255, 255, 255), 0.15 * glow), SG_INK,
+                   font=font_small_bold, depth=4, btns=home_action_rects)
+    else:
+        draw_text(surface, f"{state.challenge_progress}/{c['goal']}", font_medium_bold, SG_TEXT, btn.centerx, btn.y + 8, align="center")
+    y += 104 + 22
+
+    # Watchlist, drawn with the exact same rows as the Market.
+    r = _home_rise(4, now)
+    draw_text(surface, "Your watchlist", font_medium_bold, SG_TEXT, 20, y + r)
+    link = draw_text(surface, "See all", font_small_bold, SG_GOLD, WIDTH - 20, y + 4 + r, align="right")
+    home_action_rects["see_watchlist"] = link.inflate(16, 12)
+    y += 34
+    watch = state.watchlist[:4] if state.watchlist else ["AAPL", "MSFT", "NVDA", "AMZN"]
+    if not state.watchlist:
+        draw_text(surface, "Popular picks. Tap Watch on any stock to save your own.", font_tiny, SG_MUTED, 20, y + r)
+        y += 22
     for ticker in watch:
-        a=find_asset(ticker)
-        if not a: continue
-        r=pygame.Rect(20,y,WIDTH-40,62); draw_rounded_rect(surface,r,C("CARD"),radius=11,border_color=C("BORDER"),border_width=1); draw_ticker_badge(surface,ticker,r.x+10,r.y+11,40)
-        draw_text(surface,a["name"],font_small_bold,C("INK"),r.x+60,r.y+9,max_width=150); snap=stock_snapshot(a); col=C("GREEN") if snap["move"]>=0 else C("RED")
-        fl,upf=price_flash(("px",ticker),a["price"]); pt=fmt_money(tween(("px",ticker),a["price"],6.0))
-        if fl>0: pw=font_body_bold.size(pt)[0]; draw_alpha_rect(surface,(r.right-20-pw,r.y+6,pw+12,24),C("GREEN") if upf else C("RED"),60*fl,radius=7)
-        draw_text(surface,pt,font_body_bold,C("INK"),r.right-14,r.y+9,align="right"); draw_text(surface,f"{'+' if snap['move']>=0 else ''}{snap['move']:.2f}%",font_small_bold,col,r.right-14,r.y+33,align="right")
-        home_action_rects[f"stock:{ticker}"]=r; y+=70
-    y+=6; y=draw_why_card(surface,y); c=current_challenge(); card=pygame.Rect(20,y,WIDTH-40,92); draw_rounded_rect(surface,card,C("PURPLE_BG"),radius=14,border_color=C("PURPLE"),border_width=1)
-    draw_text(surface,"TODAY'S MISSION",font_tiny,C("PURPLE"),card.x+14,card.y+12); draw_text(surface,c["title"],font_body_bold,C("INK"),card.x+14,card.y+31); draw_text(surface,c["desc"],font_tiny,C("GRAY"),card.x+14,card.y+54,max_width=270); draw_text(surface,f"{state.challenge_progress}/{c['goal']}",font_body_bold,C("PURPLE"),card.right-18,card.y+36,align="right")
-    y+=106; draw_text(surface,"Recent activity",font_body_bold,C("INK"),20,y); y+=24
-    acts=state.recent_actions[:4] if state.recent_actions else ["Your Ledger is ready.","Complete a lesson to build your learning streak."]
-    for act in acts: draw_text(surface,"• "+(act.get("label","") if isinstance(act,dict) else str(act)),font_small,C("GRAY"),24,y,max_width=WIDTH-48); y+=22
-    clamp_scroll("home",(y-(CONTENT_TOP-off))+off); surface.set_clip(prev)
+        a = find_asset(ticker)
+        if not a:
+            continue
+        row = pygame.Rect(20, y + r, WIDTH - 40, 76)
+        if row.bottom > GAME_TOP - 5 and row.top < CONTENT_BOTTOM + 5:
+            hov = row.collidepoint(mouse) and clip.collidepoint(mouse)
+            sg_panel(surface, row, 18, color=SG_PANEL_2 if hov else SG_PANEL)
+            draw_stock_row(surface, row, a)
+        home_action_rects[f"stock:{ticker}"] = row
+        y += 86
+    y += 10
+
+    # Why did it move?
+    r = _home_rise(5, now)
+    a = max(STOCKS, key=lambda s: abs(stock_snapshot(s)["move"]))
+    move = stock_snapshot(a)["move"]
+    reason, lesson = why_it_moved(a)
+    rl = _wrap_words(reason, font_small, WIDTH - 76)[:2]
+    ll = _wrap_words(lesson, font_tiny, WIDTH - 76)[:2]
+    card = pygame.Rect(20, y + r, WIDTH - 40, 64 + 19 * len(rl) + 17 * len(ll))
+    sg_panel(surface, card, 20)
+    draw_text(surface, "WHY DID IT MOVE?", font_tiny, SG_CYAN, card.x + 18, card.y + 14)
+    mcol = SG_GREEN if move >= 0 else SG_RED
+    draw_trend_arrow(surface, card.x + 26, card.y + 42, move >= 0, mcol)
+    draw_text(surface, f"{a['name']}  {'+' if move >= 0 else ''}{move:.2f}%", font_body_bold, mcol, card.x + 42, card.y + 32,
+              max_width=card.w - 60)
+    ly = card.y + 58
+    for ln in rl:
+        draw_text(surface, ln, font_small, SG_TEXT, card.x + 18, ly)
+        ly += 19
+    for ln in ll:
+        draw_text(surface, ln, font_tiny, SG_MUTED, card.x + 18, ly)
+        ly += 17
+    home_action_rects[f"why:{a['ticker']}"] = card
+    y += card.h + 22
+
+    # Recent activity timeline.
+    r = _home_rise(6, now)
+    draw_text(surface, "Recent activity", font_medium_bold, SG_TEXT, 20, y + r)
+    y += 34
+    acts = state.recent_actions[:4] if state.recent_actions else [
+        {"label": "Your Ledger is ready."}, {"label": "Finish a lesson to start your learning streak."}]
+    panel = pygame.Rect(20, y + r, WIDTH - 40, 20 + 38 * len(acts))
+    sg_panel(surface, panel, 20)
+    for i, act in enumerate(acts):
+        label = act.get("label", "") if isinstance(act, dict) else str(act)
+        cy = panel.y + 29 + i * 38
+        if i < len(acts) - 1:
+            pygame.draw.line(surface, SG_LINE, (panel.x + 26, cy + 6), (panel.x + 26, cy + 32), 2)
+        pygame.draw.circle(surface, SG_PURPLE if i == 0 else SG_PANEL_2, (panel.x + 26, cy), 6)
+        draw_text(surface, label, font_small, SG_TEXT if i == 0 else SG_MUTED, panel.x + 44, cy - 10, max_width=panel.w - 120)
+        when = act.get("time") if isinstance(act, dict) else None
+        if when:
+            draw_text(surface, time_ago(when), font_tiny, SG_MUTED, panel.right - 16, cy - 8, align="right")
+    y += panel.h + 20
+
+    clamp_scroll_full("home", y - y0 + 10)
+    surface.set_clip(prev)
 
 
 def handle_home_click(pos):
-    for key,r in home_action_rects.items():
-        if r.collidepoint(pos):
-            if key.startswith("stock:"):
-                a=find_asset(key.split(":",1)[1]);
-                if a: open_detail_modal(a)
-            else: state.tab=key
-            play_sound("click"); return True
+    if not (GAME_TOP <= pos[1] <= CONTENT_BOTTOM):
+        return False
+    for key, r in home_action_rects.items():
+        if not r.collidepoint(pos):
+            continue
+        if key.startswith(("stock:", "why:")):
+            a = find_asset(key.split(":", 1)[1])
+            if a:
+                open_detail_modal(a)
+        elif key == "claim":
+            if claim_challenge():
+                spawn_confetti(50)
+                play_sound("achievement")
+            return True
+        elif key == "see_watchlist":
+            market_ui["filter"] = "watch" if state.watchlist else "all"
+            state.tab = "market"
+        elif key == "portfolio_hero":
+            state.tab = "portfolio"
+        else:
+            state.tab = key
+        play_sound("click")
+        return True
     return False
 
 
@@ -9652,41 +9860,46 @@ def draw_market_tab(surface):
                 draw_text(surface, f"Unlocks at level {s.get('unlock_level', 1)} or {fmt_money(s.get('unlock_worth', 0))} net worth",
                           font_tiny, SG_MUTED, rect.x + 62, rect.y + 40, max_width=rect.w - 80)
             else:
-                draw_ticker_badge(surface, s["ticker"], rect.x + 14, rect.y + 16, size=44)
-                name_w = 150
-                draw_text(surface, s["name"], font_body_bold, SG_TEXT, rect.x + 70, rect.y + 13, max_width=name_w)
-                owned = state.holdings.get(s["ticker"], 0)
-                sub = f"You own {owned:g}" if owned else s["sector"]
-                sub_col = SG_GOLD if owned else SG_MUTED
-                sr = draw_text(surface, sub, font_tiny, sub_col, rect.x + 70, rect.y + 36, max_width=name_w)
-                if s["ticker"] in state.watchlist:
-                    draw_star_shape(surface, sr.right + 10, sr.centery, 5, SG_GOLD)
-                if insight:
-                    label, up, mv = insight_signal(s)
-                    col = SG_GREEN if up else (SG_RED if up is False else SG_MUTED)
-                    draw_trend_arrow(surface, rect.x + 75, rect.y + 63, up, col, 0.8)
-                    draw_text(surface, label, font_tiny, col, rect.x + 86, rect.y + 55)
-                pct = day_move_pct(s)
-                up = pct >= 0
-                draw_mini_chart(surface, s["history"][-48:], up, rect.x + 222, rect.y + 24, 64, 26,
-                                color=SG_GREEN if up else SG_RED, anim_key=("row", s["ticker"]), **smooth_chart_args())
-                flash, went_up = price_flash(("px", s["ticker"]), s["price"])
-                shown = tween(("px", s["ticker"]), s["price"], 6.0)
-                price_text = fmt_money(shown)
-                if flash > 0:
-                    pw = font_body_bold.size(price_text)[0]
-                    draw_alpha_rect(surface, (rect.right - 20 - pw, rect.y + 11, pw + 12, 24), SG_GREEN if went_up else SG_RED,
-                                    70 * flash, radius=8)
-                draw_text(surface, price_text, font_body_bold, SG_TEXT, rect.right - 14, rect.y + 14, align="right")
-                chip_t = f"{'+' if up else ''}{pct:.2f}%"
-                cw = font_tiny.size(chip_t)[0] + 16
-                chip = pygame.Rect(rect.right - 14 - cw, rect.y + 40, cw, 22)
-                pygame.draw.rect(surface, mix_color(SG_GREEN if up else SG_RED, SG_PANEL, 0.72), chip, border_radius=11)
-                draw_text(surface, chip_t, font_tiny, SG_GREEN if up else SG_RED, chip.centerx, chip.y + 3, align="center")
+                draw_stock_row(surface, rect, s, insight)
             market_row_rects.append((rect, s))
         y = rect.bottom + 10
     clamp_scroll_full("market", y - y0 + 10)
     surface.set_clip(prev)
+
+
+def draw_stock_row(surface, rect, s, insight=False):
+    """One stock row (badge, name, mini chart, price, day move). Shared by Market and Home."""
+    draw_ticker_badge(surface, s["ticker"], rect.x + 14, rect.y + 16, size=44)
+    name_w = 150
+    draw_text(surface, s["name"], font_body_bold, SG_TEXT, rect.x + 70, rect.y + 13, max_width=name_w)
+    owned = state.holdings.get(s["ticker"], 0)
+    sub = f"You own {owned:g}" if owned else s["sector"]
+    sub_col = SG_GOLD if owned else SG_MUTED
+    sr = draw_text(surface, sub, font_tiny, sub_col, rect.x + 70, rect.y + 36, max_width=name_w)
+    if s["ticker"] in state.watchlist:
+        draw_star_shape(surface, sr.right + 10, sr.centery, 5, SG_GOLD)
+    if insight:
+        label, up, mv = insight_signal(s)
+        col = SG_GREEN if up else (SG_RED if up is False else SG_MUTED)
+        draw_trend_arrow(surface, rect.x + 75, rect.y + 63, up, col, 0.8)
+        draw_text(surface, label, font_tiny, col, rect.x + 86, rect.y + 55)
+    pct = day_move_pct(s)
+    up = pct >= 0
+    draw_mini_chart(surface, s["history"][-48:], up, rect.x + 222, rect.y + 24, 64, 26,
+                    color=SG_GREEN if up else SG_RED, anim_key=("row", s["ticker"]), **smooth_chart_args())
+    flash, went_up = price_flash(("px", s["ticker"]), s["price"])
+    shown = tween(("px", s["ticker"]), s["price"], 6.0)
+    price_text = fmt_money(shown)
+    if flash > 0:
+        pw = font_body_bold.size(price_text)[0]
+        draw_alpha_rect(surface, (rect.right - 20 - pw, rect.y + 11, pw + 12, 24), SG_GREEN if went_up else SG_RED,
+                        70 * flash, radius=8)
+    draw_text(surface, price_text, font_body_bold, SG_TEXT, rect.right - 14, rect.y + 14, align="right")
+    chip_t = f"{'+' if up else ''}{pct:.2f}%"
+    cw = font_tiny.size(chip_t)[0] + 16
+    chip = pygame.Rect(rect.right - 14 - cw, rect.y + 40, cw, 22)
+    pygame.draw.rect(surface, mix_color(SG_GREEN if up else SG_RED, SG_PANEL, 0.72), chip, border_radius=11)
+    draw_text(surface, chip_t, font_tiny, SG_GREEN if up else SG_RED, chip.centerx, chip.y + 3, align="center")
 
 
 def handle_market_click(pos):
@@ -11473,7 +11686,9 @@ def draw_scam_entry(surface, y, now):
 # Learn, Market, Portfolio, Arena and the Level Road share Scam Detective's look: a night
 # background, a compact game HUD instead of the big portfolio header, and a matching tab bar.
 
-FULL_TABS = {"academy", "levels", "market", "portfolio", "arena"}
+# Every screen uses the game look: slim HUD on top, night palette, dark cards.
+FULL_TABS = {"home", "academy", "levels", "market", "portfolio", "arena", "news", "leaderboard", "rewards",
+             "inventory", "challenges", "analytics", "journal", "settings", "parents"}
 GAME_TOP = 76            # content starts below the game HUD
 font_sg_h2 = _SysFont(_DISPLAY_FONT, 25, bold=True)
 
@@ -13580,8 +13795,8 @@ def draw_leaderboard_tab(surface):
     prev_clip = surface.get_clip()
     surface.set_clip(clip_rect)
     snap = social_snapshot()
-    draw_text(surface, "Friends", font_large_med, C("INK"), 20, CONTENT_TOP - off)
-    draw_text(surface, "Add a friend by their Ledger username. They'll get a request.", font_small, C("GRAY"), 20, CONTENT_TOP + 24 - off, max_width=WIDTH - 40)
+    draw_text(surface, "Friends", font_sg_h2, C("INK"), 20, CONTENT_TOP - off)
+    draw_text(surface, "Add a friend by their Ledger username. They'll get a request.", font_small, C("GRAY"), 20, CONTENT_TOP + 31 - off, max_width=WIDTH - 40)
 
     friend_input_rect = pygame.Rect(20, CONTENT_TOP + 52 - off, WIDTH - 140, 42)
     draw_rounded_rect(surface, friend_input_rect, C("CARD"), radius=12, border_color=C("PURPLE") if state.friend_input_text else C("BORDER"), border_width=2 if state.friend_input_text else 1)
@@ -13693,9 +13908,9 @@ def draw_news_tab(surface):
     clip_rect = pygame.Rect(0, CONTENT_TOP, WIDTH, CONTENT_BOTTOM - CONTENT_TOP)
     prev_clip = surface.get_clip()
     surface.set_clip(clip_rect)
-    draw_text(surface, "Market News", font_large_med, C("INK"), 20, CONTENT_TOP - off)
+    draw_text(surface, "Market News", font_sg_h2, C("INK"), 20, CONTENT_TOP - off)
     draw_text(surface, ("Real headlines + real quotes" if state.live_mode else "Stories move the stocks they mention") + "  •  tap Trade to act",
-              font_small, C("GRAY"), 20, CONTENT_TOP + 24 - off, max_width=WIDTH - 40)
+              font_small, C("GRAY"), 20, CONTENT_TOP + 31 - off, max_width=WIDTH - 40)
     search_y = CONTENT_TOP + 52 - off
     market_search_rect = pygame.Rect(20, search_y, WIDTH - 60, 40)
     draw_rounded_rect(surface, market_search_rect, C("CARD"), radius=10, border_color=C("PURPLE") if state.market_search_active else C("BORDER"), border_width=2 if state.market_search_active else 1)
@@ -13789,15 +14004,11 @@ def draw_settings_tab(surface):
     prev_clip = surface.get_clip()
     surface.set_clip(clip_rect)
     y = CONTENT_TOP - off
-    draw_text(surface, "Account Settings", font_large_med, C("INK"), 20, y)
-    draw_text(surface, "Theme, username, and password", font_small, C("GRAY"), 20, y + 24)
+    draw_text(surface, "Account Settings", font_sg_h2, C("INK"), 20, y)
+    draw_text(surface, "Sound, accessibility, username and password", font_small, C("GRAY"), 20, y + 31)
     y += 56
     draw_text(surface, "Appearance", font_small_bold, C("GRAY"), 20, y)
     y += 20
-    theme_btn = pygame.Rect(20, y, WIDTH - 40, 44)
-    draw_button(surface, theme_btn, f"{'Dark mode' if state.dark_mode else 'Light mode'}", C("CARD"), C("INK"), radius=10)
-    settings_click_rects["theme"] = theme_btn
-    y += 52
     sound_btn = pygame.Rect(20, y, WIDTH - 40, 44)
     draw_button(surface, sound_btn, f"Sound: {'On' if state.sound_enabled else 'Off'}", C("CARD"), C("INK"), radius=10)
     settings_click_rects["sound"] = sound_btn
@@ -15543,9 +15754,9 @@ def _draw_section_shell(surface, title, subtitle):
     clip = pygame.Rect(0, CONTENT_TOP, WIDTH, CONTENT_BOTTOM - CONTENT_TOP)
     prev = surface.get_clip(); surface.set_clip(clip)
     y = CONTENT_TOP - off
-    draw_text(surface, title, font_large_med, C("INK"), 20, y)
-    draw_text(surface, subtitle, font_small, C("GRAY"), 20, y + 25)
-    return prev, y + 62
+    draw_text(surface, title, font_sg_h2, C("INK"), 20, y)
+    draw_text(surface, subtitle, font_small, C("GRAY"), 20, y + 32)
+    return prev, y + 68
 
 
 # Guided "First Week" path: each quest teaches one habit and pays XP once.
@@ -16123,15 +16334,15 @@ def _first_market_row():
 TOUR_STEPS = [
     {"title": "Welcome to the trading floor!", "body": "Here's a quick tour of where everything lives. It takes about a minute.", "tab": "home"},
     {"title": "Your portfolio value", "body": "Everything you're worth: your cash plus the stocks you own. Green means you're up from your $1,000 start.",
-     "tab": "home", "target": lambda: pygame.Rect(12, 48, 300, 84)},
+     "tab": "home", "target": lambda: home_hero_rect},
     {"title": "Your money chart", "body": "This line moves live as your stocks change. The dashed line marks where it started.",
-     "target": lambda: pygame.Rect(12, 132, WIDTH - 24, 56)},
+     "tab": "home", "target": lambda: home_chart_rect},
     {"title": "Trophies & leagues", "body": "Win 1v1 duels in the Arena to earn trophies and climb the leagues.",
      "target": lambda: header_trophy_rect},
     {"title": "Ledger Coins", "body": "Earn coins by learning, trading and winning duels. Tap here to open Rewards: chests, boosts and cosmetics!",
      "target": lambda: header_coin_rect},
     {"title": "This is you!", "body": "Tap your avatar any time to change your look. It reacts to your trades too.",
-     "target": lambda: pygame.Rect(12, 6, 190, 46)},
+     "target": lambda: pygame.Rect(10, 8, 200, 60)},
     {"title": "Home", "body": "Your daily mission, watchlist and quick shortcuts all live here.",
      "tab": "home", "target": lambda: _tab_rect("home")},
     {"title": "Market", "body": "Every stock you can trade. Search by company name or ticker.",
