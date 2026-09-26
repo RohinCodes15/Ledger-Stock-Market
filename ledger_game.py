@@ -118,13 +118,36 @@ WIDTH, HEIGHT = 460, 780
 # high-DPI Mac the window really has 2x as many pixels. Every surface below is a
 # HiSurface: code keeps drawing in points while the pixels land at full
 # resolution, so text, curves and charts are crisp instead of upscaled.
+def _app_icon(size=256):
+    """Ledger's icon (rising bars on a dark tile), drawn in code so it can't go missing.
+    Replaces pygame's default snake icon in the title bar, taskbar and Dock."""
+    icon = pygame.Surface((size, size), pygame.SRCALPHA)
+    k = size / 1024
+    tile = pygame.Rect(int(100 * k), int(100 * k), int(824 * k), int(824 * k))
+    pygame.draw.rect(icon, (26, 26, 26), tile, border_radius=int(185 * k))
+    bar_w, gap, base = int(120 * k), int(60 * k), tile.bottom - int(190 * k)
+    x0 = tile.centerx - (3 * bar_w + 2 * gap) // 2
+    for i, (h, col) in enumerate(((220, (255, 255, 255)), (340, (255, 255, 255)), (470, (46, 204, 113)))):
+        pygame.draw.rect(icon, col, pygame.Rect(x0 + i * (bar_w + gap), base - int(h * k), bar_w, int(h * k)),
+                         border_radius=int(30 * k))
+    return icon
+
+
 def _open_window():
     try:
         win = pygame.Window("Ledger — Learn the Market", (WIDTH, HEIGHT), allow_high_dpi=True)
+        try:
+            win.set_icon(_app_icon())
+        except Exception:
+            pass
         surf = win.get_surface()
         pygame.key.start_text_input()
         return win, surf
     except Exception:
+        try:
+            pygame.display.set_icon(_app_icon())
+        except Exception:
+            pass
         surf = pygame.display.set_mode((WIDTH, HEIGHT))
         pygame.display.set_caption("Ledger — Learn the Market")
         return None, surf
