@@ -363,24 +363,25 @@ THEMES = {
         "FLASH_RED": (255, 59, 48),
     },
     "dark": {
-        # Matches the night look of the game pages (Learn, Market, Portfolio, Arena).
-        "BG": (13, 12, 28),
-        "CARD": (29, 27, 55),
-        "BORDER": (58, 54, 99),
-        "INK": (246, 245, 255),
-        "GRAY": (163, 159, 199),
-        "LIGHT_GRAY": (104, 100, 145),
-        "PANEL_BG": (22, 20, 44),
-        "GOLD_BG": (48, 40, 22),
-        "GREEN": (46, 204, 113),
-        "RED": (231, 76, 60),
-        "GOLD": (241, 196, 15),
-        "PURPLE": (155, 89, 182),
-        "PURPLE_BG": (42, 32, 74),
-        "ORANGE": (230, 126, 34),
-        "TEAL": (20, 150, 136),
-        "FLASH_GREEN": (46, 204, 113),
-        "FLASH_RED": (231, 76, 60),
+        # Despite the name, this is the palette the whole game runs on: a clean white look
+        # with one green accent, like a real brokerage app.
+        "BG": (255, 255, 255),
+        "CARD": (255, 255, 255),
+        "BORDER": (230, 230, 232),
+        "INK": (17, 17, 19),
+        "GRAY": (110, 110, 118),
+        "LIGHT_GRAY": (160, 160, 168),
+        "PANEL_BG": (245, 245, 247),
+        "GOLD_BG": (245, 245, 247),
+        "GREEN": (0, 160, 70),
+        "RED": (220, 50, 40),
+        "GOLD": (17, 17, 19),
+        "PURPLE": (17, 17, 19),
+        "PURPLE_BG": (245, 245, 247),
+        "ORANGE": (220, 50, 40),
+        "TEAL": (0, 160, 70),
+        "FLASH_GREEN": (0, 200, 5),
+        "FLASH_RED": (255, 80, 0),
     },
 }
 
@@ -701,8 +702,8 @@ NEWS_DOWN = [
 ACHIEVEMENTS = [
     {"id": "first_buy", "label": "First Trade", "desc": "Buy your first stock"},
     {"id": "first_duel", "label": "Gladiator", "desc": "Complete your first 1v1 Blitz Duel"},
-    {"id": "duel_win", "label": "First Victory 🏆", "desc": "Win a 1v1 Blitz Duel against a rival"},
-    {"id": "streak_3", "label": "On Fire! 🔥", "desc": "Achieve a 3-win duel streak"},
+    {"id": "duel_win", "label": "First win", "desc": "Win a 1v1 Blitz Duel against a rival"},
+    {"id": "streak_3", "label": "Three in a row", "desc": "Achieve a 3-win duel streak"},
     {"id": "dividend_earned", "label": "Dividend Payday", "desc": "Collect your first dividend payment"},
     {"id": "diversify", "label": "Diversified", "desc": "Own 3 different stocks at once"},
     {"id": "profit_10", "label": "In the Green", "desc": "Reach $1,100 net worth"},
@@ -2059,7 +2060,7 @@ PERSONA_LINES = {
             "panic": ["Eek! But we've got this!", "Deep breath, friend!"],
         },
         "react": {
-            "buy": ["Nice pick! Good luck!", "Ooh, exciting!"],
+            "buy": ["Nice pick! Good luck!", "Bought. Now watch it."],
             "sell": ["Sold! Great job!", "Another one done!"],
             "profit": ["Profit party!", "Look at that gain!"],
             "loss": ["It's okay, we learn!", "Every trader has red days."],
@@ -4347,9 +4348,9 @@ def draw_trade_fx(surface):
     out = HiSurface(None, hi=img)
     surface.blit(out, (card.centerx - out.get_width() / 2, card.centery - out.get_height() / 2))
     if s > 0.85 and fade > 0.2:
-        draw_text_outlined(surface, title, font_large, title_col, card.centerx, card.y + 18, (26, 24, 40))
+        draw_text_outlined(surface, title, font_large, title_col, card.centerx, card.y + 18, SG_PANEL)
         sign = "+" if shown >= 0 else "-"
-        draw_text_outlined(surface, f"{sign}{fmt_money(abs(shown))}", font_countdown, amt_col, card.centerx, card.y + 62, (26, 24, 40))
+        draw_text_outlined(surface, f"{sign}{fmt_money(abs(shown))}", font_countdown, amt_col, card.centerx, card.y + 62, SG_PANEL)
         draw_text(surface, sub, font_tiny, (200, 196, 220), card.centerx, card.bottom - 27, align="center", max_width=card.w - 24)
 
 
@@ -5611,7 +5612,10 @@ def _hero_glow(size, circles, blur):
     """Soft glow for a dark hero card. Blurring takes ~0.2s, so each look is built once and reused."""
     key = (tuple(size), tuple(circles), blur, UI_SCALE)
     glow = _hero_glow_cache.get(key)
+    if glow is None and not circles:
+        pass
     if glow is None:
+        circles = []
         glow = HiSurface(size, pygame.SRCALPHA)
         for color, center, r in circles:
             pygame.draw.circle(glow, color, center, r)
@@ -5626,7 +5630,7 @@ def _hero_glow(size, circles, blur):
 
 
 def _dark_hero(surface, rect, glow_col=(255, 190, 40)):
-    draw_rounded_rect(surface, rect, (30, 27, 52), radius=20)
+    draw_rounded_rect(surface, rect, SG_PANEL, radius=20, border_color=SG_LINE, border_width=1, shadow=False)
     surface.blit(_hero_glow(rect.size, [((*glow_col, 60), (70, rect.h // 2), 80)], 20), rect.topleft)
 
 
@@ -6068,7 +6072,8 @@ def draw_levels_tab(surface):
 
     # Hero: level badge, XP to next level, claim-all.
     hero = pygame.Rect(20, y0, WIDTH - 40, 170)
-    pygame.draw.rect(surface, (27, 24, 56), hero, border_radius=24)
+    pygame.draw.rect(surface, SG_PANEL, hero, border_radius=24)
+    pygame.draw.rect(surface, SG_LINE, hero, 1, border_radius=24)
     surface.blit(_hero_glow(hero.size, [((*SG_GOLD, 60), (70, 70), 80), ((*SG_PURPLE, 60), (hero.w - 40, hero.h), 90)], 18), hero.topleft)
     pygame.draw.rect(surface, SG_LINE, hero, 1, border_radius=24)
     bc = (hero.x + 72, hero.y + 78)
@@ -6078,7 +6083,7 @@ def draw_levels_tab(surface):
     draw_text(surface, "LEVEL", font_tiny, SG_MUTED, bc[0], bc[1] - 24, align="center")
     draw_text(surface, str(lv_now), font_sg_title, SG_TEXT, bc[0], bc[1] - 10, align="center")
     tx = hero.x + 144
-    draw_text(surface, "LEVEL ROAD", font_tiny, SG_GOLD, tx, hero.y + 24)
+    draw_text(surface, "Level road", font_tiny, SG_MUTED, tx, hero.y + 24)
     draw_text(surface, f"XP to Level {lv_now + 1}", font_body, SG_MUTED, tx, hero.y + 44)
     draw_text(surface, f"{max(0, req - state.xp):,} XP", font_sg_h2, SG_TEXT, tx, hero.y + 64)
     draw_text(surface, "Learn, trade and battle to earn XP", font_tiny, SG_MUTED, tx, hero.y + 98, max_width=hero.right - 16 - tx)
@@ -6699,23 +6704,7 @@ def draw_logo_mark(surface, cx, cy, size=48):
 
 
 def draw_app_background(surface):
-    """Subtle premium background: depth without visual noise. Built once per theme."""
-    key = state.dark_mode
-    bg_img = _background_cache.get(key)
-    if bg_img is None:
-        bg_img = HiSurface((WIDTH, HEIGHT))
-        bg = C("BG")
-        top = C("PANEL_BG")
-        for y in range(0, HEIGHT, 2):
-            t = y / max(1, HEIGHT - 1)
-            pygame.draw.rect(bg_img, mix_color(top, bg, t), (0, y, WIDTH, 2))
-        glow = HiSurface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        pygame.draw.circle(glow, (*C("PURPLE"), 16), (WIDTH - 20, 70), 130)
-        pygame.draw.circle(glow, (*C("GREEN"), 12), (30, HEIGHT - 120), 120)
-        glow.hi = soft_blur(glow.hi, _sc(30))
-        bg_img.blit(glow, (0, 0))
-        _background_cache[key] = bg_img
-    surface.blit(bg_img, (0, 0))
+    surface.fill(C("BG"))
 
 
 def _fit_text_image(text, font, max_width):
@@ -6782,7 +6771,7 @@ def draw_text(surface, text, font, color, x, y, align="left", max_width=None, sh
     # Extremely subtle depth on important text only. Small labels stay flat and clean.
     if shadow and (font.get_height() >= 18):
         shadow_img = font.render(text if font.size(text)[0] <= max_width else fitted, True, (0, 0, 0))
-        shadow_img.set_alpha(28 if not state.dark_mode else 70)
+        shadow_img.set_alpha(0)
         surface.blit(shadow_img, rect.move(0, 1))
     surface.blit(img, rect)
     return rect
@@ -6798,7 +6787,7 @@ def draw_text_outlined(surface, text, font, color, x, y, outline=(0, 0, 0), alig
 def draw_rounded_rect(surface, rect, color, radius=10, border_color=None, border_width=0, shadow=True):
     rect = pygame.Rect(rect)
     if shadow and rect.w >= 40 and rect.h >= 24:
-        img, pad = soft_shadow(rect.w, rect.h, radius, 6, 46 if not state.dark_mode else 140)
+        img, pad = soft_shadow(rect.w, rect.h, radius, 6, 14)
         surface.blit(img, (rect.x - pad, rect.y - pad + 3))
     pygame.draw.rect(surface, color, rect, border_radius=radius)
     if border_color and border_width:
@@ -9349,7 +9338,7 @@ def draw_header(surface):
     global header_level_rect
     header_level_rect = pygame.Rect(58, 26, lvr.right - 58 + 6, 20)
     if unclaimed_levels():
-        pygame.draw.circle(surface, (235, 64, 52), (lvr.right + 5, lvr.y + 3), 4)
+        pygame.draw.circle(surface, SG_GREEN, (lvr.right + 5, lvr.y + 3), 4)
 
     req_xp = state.level * 100
     xp_pct = min(1.0, state.xp / req_xp)
@@ -9458,37 +9447,16 @@ def _home_rise(i, now):
 
 def _home_hero(surface, card, now):
     """Portfolio hero: glow, drifting sparks, a shimmer sweep, count-up value and a live sparkline."""
-    base = (27, 24, 56)
+    base = SG_PANEL
     pygame.draw.rect(surface, base, card, border_radius=22)
     daily = portfolio_daily_pnl()
     nw = net_worth()
     up_all = nw >= STARTING_CASH
-    glow_col = SG_GREEN if daily >= 0 else SG_RED
-    surface.blit(_hero_glow(card.size, [((*glow_col, 46), (card.w - 50, 26), 84), ((*SG_PURPLE, 54), (36, card.h), 74)], 18),
-                 card.topleft)
-    calm = getattr(state, "reduced_motion", False)
     prev = surface.get_clip()
-    surface.set_clip(card.inflate(-4, -4).clip(prev) if prev else card.inflate(-4, -4))
-    if not calm:
-        # Tiny sparks drifting upward, like bubbles in a soda.
-        for k in range(9):
-            span = card.h - 20
-            yy = card.bottom - 10 - ((now * (10 + k % 3 * 4) + k * 41) % span)
-            xx = card.x + 20 + (k * 67 + int(math.sin(now * 0.8 + k) * 8)) % (card.w - 40)
-            fade = min(1.0, (card.bottom - 10 - yy) / 40, (yy - card.y) / 40)
-            pygame.draw.circle(surface, mix_color(base, glow_col, 0.35 * max(0.0, fade)), (xx, yy), 2 + k % 2)
-        # A soft light sweep every 7 seconds.
-        t = (now % 7.0) / 1.4
-        if t < 1.0:
-            sx = card.x - 80 + t * (card.w + 160)
-            pygame.draw.polygon(surface, mix_color(base, (255, 255, 255), 0.05),
-                                [(sx, card.y), (sx + 46, card.y), (sx - 14, card.bottom), (sx - 60, card.bottom)])
     surface.set_clip(prev)
     pygame.draw.rect(surface, SG_LINE, card, 1, border_radius=22)
 
-    pulse = 0.5 + 0.5 * math.sin(now * 3)
-    pygame.draw.circle(surface, mix_color(SG_BG, SG_GREEN, 0.4 + 0.6 * pulse), (card.x + 22, card.y + 22), 4)
-    draw_text(surface, "PORTFOLIO VALUE", font_tiny, SG_GOLD, card.x + 34, card.y + 15)
+    draw_text(surface, "Portfolio value", font_tiny, SG_MUTED, card.x + 18, card.y + 15)
     draw_text(surface, fmt_money(tween("header_net_worth", nw, 7.0)), font_large, SG_TEXT, card.x + 18, card.y + 34)
     col = SG_GREEN if daily >= 0 else SG_RED
     chip_t = f"Today {'+' if daily >= 0 else '-'}{fmt_money(abs(daily))}"
@@ -9570,7 +9538,7 @@ def draw_home_tab(surface):
     card = pygame.Rect(20, y + r, WIDTH - 40, 104)
     sg_panel(surface, card, 20)
     pygame.draw.rect(surface, SG_GOLD if done and not state.challenge_claimed else SG_LINE, card, 2 if done else 1, border_radius=20)
-    draw_text(surface, "TODAY'S MISSION", font_tiny, SG_GOLD, card.x + 18, card.y + 14)
+    draw_text(surface, "Today's mission", font_tiny, SG_MUTED, card.x + 18, card.y + 14)
     draw_text(surface, f"+{c['reward']} XP", font_tiny, SG_PURPLE, card.right - 18, card.y + 14, align="right")
     draw_text(surface, c["title"], font_body_bold, SG_TEXT, card.x + 18, card.y + 32, max_width=card.w - 150)
     draw_text(surface, c["desc"], font_tiny, SG_MUTED, card.x + 18, card.y + 54, max_width=card.w - 150)
@@ -9622,7 +9590,7 @@ def draw_home_tab(surface):
     ll = _wrap_words(lesson, font_tiny, WIDTH - 76)[:2]
     card = pygame.Rect(20, y + r, WIDTH - 40, 64 + 19 * len(rl) + 17 * len(ll))
     sg_panel(surface, card, 20)
-    draw_text(surface, "WHY DID IT MOVE?", font_tiny, SG_CYAN, card.x + 18, card.y + 14)
+    draw_text(surface, "Why did it move?", font_tiny, SG_MUTED, card.x + 18, card.y + 14)
     mcol = SG_GREEN if move >= 0 else SG_RED
     draw_trend_arrow(surface, card.x + 26, card.y + 42, move >= 0, mcol)
     draw_text(surface, f"{a['name']}  {'+' if move >= 0 else ''}{move:.2f}%", font_body_bold, mcol, card.x + 42, card.y + 32,
@@ -9758,10 +9726,11 @@ def draw_market_tab(surface):
     movers = sorted(STOCKS, key=lambda a: day_move_pct(a))
     ups = sum(1 for a in STOCKS if day_move_pct(a) >= 0)
     mood = pygame.Rect(20, y, WIDTH - 40, 176)
-    pygame.draw.rect(surface, (27, 24, 56), mood, border_radius=22)
+    pygame.draw.rect(surface, SG_PANEL, mood, border_radius=22)
+    pygame.draw.rect(surface, SG_LINE, mood, 1, border_radius=22)
     surface.blit(_hero_glow(mood.size, [((*SG_GREEN, 40), (mood.w - 60, 30), 80), ((*SG_PURPLE, 50), (40, mood.h), 70)], 18), mood.topleft)
     pygame.draw.rect(surface, SG_LINE, mood, 1, border_radius=22)
-    draw_text(surface, "MARKET MOOD", font_tiny, SG_GOLD, mood.x + 18, mood.y + 16)
+    draw_text(surface, "Market mood", font_tiny, SG_MUTED, mood.x + 18, mood.y + 16)
     draw_text(surface, state.market_regime["name"], font_medium_bold, SG_TEXT, mood.x + 18, mood.y + 34, max_width=mood.w - 36)
     draw_text(surface, state.event_banner or state.market_regime.get("desc", ""), font_small, SG_MUTED, mood.x + 18, mood.y + 58,
               max_width=mood.w - 36)
@@ -10005,8 +9974,9 @@ WEALTH_MILESTONES = [  # (net worth, coins, chest)
     (1250, 50, "common"), (1500, 80, "rare"), (2000, 120, "rare"), (3000, 200, "epic"),
     (5000, 300, "epic"), (10000, 600, "legendary"),
 ]
-SECTOR_COLORS = [(167, 139, 250), (34, 211, 238), (250, 204, 21), (34, 197, 94), (251, 146, 60), (244, 114, 182),
-                 (96, 165, 250), (163, 230, 53)]
+# Shades of the one accent plus grays, so the donut matches the rest of the app.
+SECTOR_COLORS = [(0, 160, 70), (17, 17, 19), (120, 200, 150), (140, 140, 148), (0, 100, 45),
+                 (200, 200, 206), (60, 180, 110), (80, 80, 88)]
 portfolio_ui = {"btns": {}}
 
 
@@ -10067,13 +10037,14 @@ def draw_portfolio_tab(surface):
 
     # Hero: net worth, gain, chart and your trader.
     hero = pygame.Rect(20, y, WIDTH - 40, 214)
-    pygame.draw.rect(surface, (27, 24, 56), hero, border_radius=24)
+    pygame.draw.rect(surface, SG_PANEL, hero, border_radius=24)
+    pygame.draw.rect(surface, SG_LINE, hero, 1, border_radius=24)
     gain = nw - STARTING_CASH
     up = gain >= 0
     surface.blit(_hero_glow(hero.size, [((*(SG_GREEN if up else SG_RED), 50), (60, 150), 90), ((*SG_PURPLE, 60), (hero.w - 60, 50), 80)], 18),
                  hero.topleft)
     pygame.draw.rect(surface, SG_LINE, hero, 1, border_radius=24)
-    draw_text(surface, "NET WORTH", font_tiny, SG_GOLD, hero.x + 20, hero.y + 20)
+    draw_text(surface, "Net worth", font_tiny, SG_MUTED, hero.x + 20, hero.y + 20)
     shown = tween("pf_nw", nw, 7)
     draw_text(surface, fmt_money(shown), font_sg_title, SG_TEXT, hero.x + 20, hero.y + 38, max_width=hero.w - 150)
     chip_t = f"{'+' if up else '-'}{fmt_money(abs(gain))} ({'+' if up else '-'}{abs(gain / STARTING_CASH * 100):.1f}%) since you started"
@@ -10431,23 +10402,23 @@ SCAM_CARD_BOTTOM = HEIGHT - 164
 SCAM_CARD_TOP_MIN = 64       # highest the card may move to make room for the verdict sheet
 
 # The mode has its own night-time look in both light and dark mode.
-SG_BG = (13, 12, 28)
-SG_PANEL = (29, 27, 55)
-SG_PANEL_2 = (42, 39, 77)
-SG_LINE = (58, 54, 99)
-SG_TEXT = (246, 245, 255)
-SG_MUTED = (163, 159, 199)
-SG_RED = (244, 63, 94)
-SG_GREEN = (34, 197, 94)
-SG_GOLD = (250, 204, 21)
-SG_AMBER = (251, 146, 60)
-SG_CYAN = (34, 211, 238)
-SG_PURPLE = (167, 139, 250)
+SG_BG = (255, 255, 255)
+SG_PANEL = (255, 255, 255)
+SG_PANEL_2 = (240, 240, 242)
+SG_LINE = (230, 230, 232)
+SG_TEXT = (17, 17, 19)
+SG_MUTED = (110, 110, 118)
+SG_RED = (220, 50, 40)
+SG_GREEN = (0, 160, 70)
+SG_GOLD = (0, 160, 70)      # the one accent: buttons, highlights, progress
+SG_AMBER = (110, 110, 118)
+SG_CYAN = (17, 17, 19)
+SG_PURPLE = (160, 160, 168)
 SG_CARD = (255, 255, 255)
-SG_INK = (24, 24, 33)
-SG_CARD_MUTED = (113, 110, 128)
-SG_CARD_LINE = (236, 234, 242)
-SG_BUBBLE = (242, 241, 247)
+SG_INK = (255, 255, 255)    # text drawn on top of the accent
+SG_CARD_MUTED = (110, 110, 118)
+SG_CARD_LINE = (230, 230, 232)
+SG_BUBBLE = (245, 245, 247)
 # Clue highlights on the white card: (background, text).
 SG_HL = {"scam": ((255, 214, 220), (176, 19, 60)), "legit": ((200, 246, 216), (21, 110, 55)),
          "hint": ((226, 219, 254), (91, 33, 182))}
@@ -10759,35 +10730,13 @@ def _sg_glow(color, r, alpha):
     img = _sg_cache.get(ck)
     if img is None:
         img = HiSurface((r * 4, r * 4), pygame.SRCALPHA)
-        pygame.draw.circle(img, (*color, alpha), (r * 2, r * 2), r)
-        img.hi = soft_blur(img.hi, _sc(r * 0.7))
+        # Left transparent: the clean look has no glows.
         _sg_cache[ck] = img
     return img
 
 
 def _sg_background(surface, now, accent=SG_PURPLE):
-    base = _sg_cache.get(("bg", UI_SCALE))
-    if base is None:
-        base = HiSurface((WIDTH, HEIGHT))
-        top, bottom = (27, 24, 56), SG_BG
-        for yy in range(HEIGHT):
-            pygame.draw.line(base, mix_color(top, bottom, yy / HEIGHT), (0, yy), (WIDTH, yy))
-        _sg_cache[("bg", UI_SCALE)] = base
-    surface.blit(base, (0, 0))
-    calm = getattr(state, "reduced_motion", False)
-    for col, x0, y0, r, sp, ph in ((accent, 90, 170, 150, 0.35, 0.0), (SG_CYAN, WIDTH - 60, HEIGHT - 190, 130, 0.28, 2.0)):
-        dx = 0 if calm else math.sin(now * sp + ph) * 36
-        dy = 0 if calm else math.cos(now * sp * 0.8 + ph) * 24
-        img = _sg_glow(col, r, 46)
-        surface.blit(img, (x0 + dx - r * 2, y0 + dy - r * 2))
-    dots = _sg_cache.get(("dots", UI_SCALE))
-    if dots is None:
-        dots = HiSurface((WIDTH, HEIGHT + 32), pygame.SRCALPHA)
-        for yy in range(0, HEIGHT + 32, 32):
-            for xx in range(16, WIDTH, 32):
-                pygame.draw.circle(dots, (255, 255, 255, 16), (xx, yy), 1.3)
-        _sg_cache[("dots", UI_SCALE)] = dots
-    surface.blit(dots, (0, -((now * 9) % 32) if not calm else 0))
+    surface.fill(SG_BG)
 
 
 def _sg_button(surface, rect, key, label, bg, fg, font=font_medium_bold, icon=None, depth=5, btns=None):
@@ -10795,8 +10744,9 @@ def _sg_button(surface, rect, key, label, bg, fg, font=font_medium_bold, icon=No
     mouse = pygame.mouse.get_pos()
     hovered = rect.collidepoint(mouse)
     pressed = hovered and pygame.mouse.get_pressed()[0]
-    lift = 1 if pressed else depth
-    rim = mix_color(bg, (0, 0, 0), 0.35)
+    depth = 0   # flat buttons
+    lift = 0
+    rim = bg
     face = rect.move(0, depth - lift)
     pygame.draw.rect(surface, rim, rect.move(0, depth), border_radius=16)
     pygame.draw.rect(surface, mix_color(bg, (255, 255, 255), 0.08) if hovered and not pressed else bg, face, border_radius=16)
@@ -11003,13 +10953,13 @@ def _scam_draw_card(surface, case, x, y, now, reveal_t=None, hint_t=None, word_t
     img = font_medium_bold.render(initial, True, (255, 255, 255))
     surface.blit(img, img.get_rect(center=(av[0], av[1] + 1)))
     name_w = card.w - 88 - 18
-    draw_text(surface, case.get("sender", ""), font_body_bold, SG_INK, card.x + 68, card.y + 53, max_width=name_w)
+    draw_text(surface, case.get("sender", ""), font_body_bold, SG_TEXT, card.x + 68, card.y + 53, max_width=name_w)
     draw_text(surface, case.get("handle", ""), font_tiny, SG_CARD_MUTED, card.x + 68, card.y + 75, max_width=name_w)
     pygame.draw.line(surface, SG_CARD_LINE, (card.x + 18, card.y + 104), (card.right - 18, card.y + 104), 1)
 
     by = card.y + 116
     for line in spec["subject"]:
-        draw_text(surface, line, font_body_bold, SG_INK, card.x + 18, by, max_width=card.w - 36)
+        draw_text(surface, line, font_body_bold, SG_TEXT, card.x + 18, by, max_width=card.w - 36)
         by += 22
     if case.get("channel") == "call":
         # Voicemail waveform.
@@ -11058,7 +11008,7 @@ def _scam_draw_card(surface, case, x, y, now, reveal_t=None, hint_t=None, word_t
             n += 1
             if a <= 0:
                 continue
-            img = font_body.render(word, True, colored.get(fi, SG_INK))
+            img = font_body.render(word, True, colored.get(fi, SG_TEXT))
             if a < 1:
                 img.set_alpha(int(255 * a))
             surface.blit(img, (tx + x0, ly + 1 + int((1 - a) * 4)))
@@ -11247,7 +11197,7 @@ def _scam_draw_hud(surface, now, alpha_row2):
     frac = left / SCAM_TIME
     bar = pygame.Rect(20, 66, WIDTH - 40, 8)
     pygame.draw.rect(row, SG_PANEL_2, bar, border_radius=4)
-    tcol = SG_CYAN if left > 10 else (SG_AMBER if left > 5 else SG_RED)
+    tcol = SG_GREEN if left > 10 else (SG_AMBER if left > 5 else SG_RED)
     if left <= 5 and g["phase"] == "ask":
         tcol = mix_color(tcol, (255, 255, 255), 0.35 * (0.5 + 0.5 * math.sin(now * 14)))
     if frac > 0:
@@ -11673,25 +11623,25 @@ def draw_scam_entry(surface, y, now):
     card = pygame.Rect(20, y, WIDTH - 40, 168)
     academy_scam_play_btn = card
     hovered = card.collidepoint(pygame.mouse.get_pos()) and GAME_TOP <= pygame.mouse.get_pos()[1] <= CONTENT_BOTTOM
-    draw_rounded_rect(surface, card, (27, 24, 56), radius=22)
+    draw_rounded_rect(surface, card, SG_PANEL, radius=22)
     surface.blit(_hero_glow(card.size, [((*SG_PURPLE, 70), (card.w - 70, 40), 90), ((*SG_CYAN, 34), (40, card.h), 70)], 18),
                  card.topleft)
     if hovered:
         pygame.draw.rect(surface, SG_GOLD, card, 2, border_radius=22)
 
-    draw_text(surface, "ARCADE", font_tiny, SG_GOLD, card.x + 20, card.y + 18)
+    draw_text(surface, "Arcade", font_tiny, SG_MUTED, card.x + 20, card.y + 18)
     draw_text(surface, "Scam Detective", font_large_med, SG_TEXT, card.x + 20, card.y + 36)
     draw_text(surface, f"{len(SCAM_CASES)} cases to crack", font_small, SG_MUTED, card.x + 20, card.y + 66)
     _ri, rname, rcol, _f, _n = scam_rank()
-    chip = _sg_chip(surface, card.x + 20, card.y + 90, rname, rcol, mix_color(rcol, (27, 24, 56), 0.78), icon="star")
+    chip = _sg_chip(surface, card.x + 20, card.y + 90, rname, rcol, mix_color(rcol, SG_PANEL, 0.78), icon="star")
     if stats["best"]:
-        _sg_chip(surface, chip.right + 8, card.y + 90, f"Best {stats['best']:,}", SG_GOLD, mix_color(SG_GOLD, (27, 24, 56), 0.8))
+        _sg_chip(surface, chip.right + 8, card.y + 90, f"Best {stats['best']:,}", SG_GOLD, mix_color(SG_GOLD, SG_PANEL, 0.8))
 
     # Mini phone with a message getting scanned.
     phone = pygame.Rect(card.right - 132, card.y + 20, 108, 128)
     bob = math.sin(now * 2) * 3
     phone.y += int(bob)
-    pygame.draw.rect(surface, (14, 13, 30), phone.inflate(8, 8), border_radius=18)
+    pygame.draw.rect(surface, SG_BG, phone.inflate(8, 8), border_radius=18)
     pygame.draw.rect(surface, SG_CARD, phone, border_radius=14)
     pygame.draw.circle(surface, (219, 39, 119), (phone.x + 18, phone.y + 18), 8)
     pygame.draw.rect(surface, SG_CARD_LINE, (phone.x + 32, phone.y + 12, 50, 6), border_radius=3)
@@ -11754,7 +11704,7 @@ def draw_game_hud(surface):
         shade = HiSurface((WIDTH, GAME_TOP), pygame.SRCALPHA)
         for yy in range(GAME_TOP):
             a = 255 if yy < GAME_TOP - 14 else int(255 * (GAME_TOP - yy) / 14)
-            pygame.draw.line(shade, (*mix_color((27, 24, 56), SG_BG, 0.1), a), (0, yy), (WIDTH, yy))
+            pygame.draw.line(shade, (*mix_color(SG_PANEL, SG_BG, 0.1), a), (0, yy), (WIDTH, yy))
         _sg_cache[("hudshade", UI_SCALE)] = shade
     surface.blit(shade, (0, 0))
 
@@ -11913,7 +11863,7 @@ def _lesson_node(surface, cx, cy, r, col, glyph, status, now, lift=0.0):
 
 
 def text_on_game(fill):
-    return SG_INK if _luminance(fill) > 0.45 else (255, 255, 255)
+    return SG_TEXT if _luminance(fill) > 0.45 else (255, 255, 255)
 
 
 def draw_academy_tab(surface):
@@ -11935,13 +11885,14 @@ def draw_academy_tab(surface):
 
     # Hero: title, streak, stars and a course progress ring.
     hero = pygame.Rect(20, y, WIDTH - 40, 150)
-    pygame.draw.rect(surface, (27, 24, 56), hero, border_radius=24)
+    pygame.draw.rect(surface, SG_PANEL, hero, border_radius=24)
+    pygame.draw.rect(surface, SG_LINE, hero, 1, border_radius=24)
     surface.blit(_hero_glow(hero.size, [((*SG_PURPLE, 80), (hero.w - 70, 50), 90), ((*SG_CYAN, 36), (30, hero.h), 70)], 18),
                  hero.topleft)
     pygame.draw.rect(surface, SG_LINE, hero, 1, border_radius=24)
-    draw_text(surface, "LEDGER ACADEMY", font_tiny, SG_GOLD, hero.x + 20, hero.y + 20)
-    draw_text(surface, "Level up your", font_sg_h2, SG_TEXT, hero.x + 20, hero.y + 38)
-    draw_text(surface, "money brain", font_sg_h2, SG_TEXT, hero.x + 20, hero.y + 68)
+    draw_text(surface, "Ledger Academy", font_tiny, SG_MUTED, hero.x + 20, hero.y + 20)
+    draw_text(surface, "35 short lessons", font_sg_h2, SG_TEXT, hero.x + 20, hero.y + 38)
+    draw_text(surface, "on how money works", font_sg_h2, SG_TEXT, hero.x + 20, hero.y + 68)
     streak = int(getattr(state, "learning_streak", 0))
     chip = _sg_chip(surface, hero.x + 20, hero.y + 110, f"{streak}-day streak", SG_AMBER, mix_color(SG_AMBER, SG_BG, 0.8), icon="flame", h=26)
     _sg_chip(surface, chip.right + 8, hero.y + 110, f"{stars_total} stars", SG_GOLD, mix_color(SG_GOLD, SG_BG, 0.82), icon="star", h=26)
@@ -12458,12 +12409,12 @@ def _lg_draw_learn(surface, now, info, col):
     band = pygame.Rect(lc.x, lc.y, lc.w, 70)
     pygame.draw.rect(layer, mix_color(ccol, SG_CARD, 0.84), band, border_top_left_radius=24, border_top_right_radius=24)
     pygame.draw.circle(layer, ccol, (lc.x + 44, lc.y + 35), 20)
-    _sg_icon(layer, icon, lc.x + 44, lc.y + 35, SG_INK if _luminance(ccol) > 0.45 else (255, 255, 255), 1.0)
-    draw_text(layer, label, font_body_bold, SG_INK, lc.x + 76, lc.y + 16)
+    _sg_icon(layer, icon, lc.x + 44, lc.y + 35, SG_TEXT if _luminance(ccol) > 0.45 else (255, 255, 255), 1.0)
+    draw_text(layer, label, font_body_bold, SG_TEXT, lc.x + 76, lc.y + 16)
     draw_text(layer, f"Card {g['card'] + 1} of {len(LESSON_CARDS)}", font_tiny, SG_CARD_MUTED, lc.x + 76, lc.y + 39)
     for i, line in enumerate(lines):
         wa = _clamp01((ct - 0.15 - i * 0.06) / 0.25)
-        img = font.render(line, True, SG_INK)
+        img = font.render(line, True, SG_TEXT)
         if wa < 1:
             img.set_alpha(int(255 * wa))
         layer.blit(img, (lc.x + 28, lc.y + 96 + i * lh + int((1 - wa) * 6)))
@@ -12486,7 +12437,7 @@ def _lg_draw_learn(surface, now, info, col):
             pygame.draw.rect(ghost, SG_CARD, (20, 20, card.w, 80), border_radius=24)
             pygame.draw.rect(ghost, mix_color(fcol, SG_CARD, 0.84), (20, 20, card.w, 70), border_top_left_radius=24,
                              border_top_right_radius=24)
-            draw_text(ghost, flab, font_body_bold, SG_INK, 96, 36)
+            draw_text(ghost, flab, font_body_bold, SG_TEXT, 96, 36)
             rot = HiSurface(None, hi=pygame.transform.rotozoom(ghost.hi, 18 * ft, 1.0))
             rot.set_alpha(int(255 * (1 - ft)))
             surface.blit(rot, rot.get_rect(center=(int(card.centerx - ease_out_cubic(ft) * WIDTH), card.y + 60)).topleft)
@@ -13497,10 +13448,11 @@ def draw_arena_tab(surface):
     name, floor, lcol = league_tier()
     nxt = next((t for t in LEAGUE_TIERS if t[1] > state.trophies), None)
     hero = pygame.Rect(20, y, WIDTH - 40, 150)
-    pygame.draw.rect(surface, (27, 24, 56), hero, border_radius=24)
+    pygame.draw.rect(surface, SG_PANEL, hero, border_radius=24)
+    pygame.draw.rect(surface, SG_LINE, hero, 1, border_radius=24)
     surface.blit(_hero_glow(hero.size, [((*SG_RED, 50), (hero.w - 60, 40), 90), ((*SG_GOLD, 50), (40, hero.h), 70)], 18), hero.topleft)
     pygame.draw.rect(surface, SG_LINE, hero, 1, border_radius=24)
-    draw_text(surface, "BATTLE ARENA", font_tiny, SG_GOLD, hero.x + 20, hero.y + 20)
+    draw_text(surface, "Battle arena", font_tiny, SG_MUTED, hero.x + 20, hero.y + 20)
     draw_text(surface, "Out-trade the bots", font_sg_h2, SG_TEXT, hero.x + 20, hero.y + 38)
     wins, played = state.total_wins, state.total_duels
     draw_text(surface, f"{wins} win{'s' if wins != 1 else ''}  ·  {played} battle{'s' if played != 1 else ''}  ·  {state.win_streak} streak",
@@ -14366,9 +14318,7 @@ def draw_tab_bar(surface):
     y0 = HEIGHT - TAB_BAR_HEIGHT
     night = is_full_tab()
     bar_bg, bar_line = (SG_BG, SG_LINE) if night else (C("CARD"), C("BORDER"))
-    pill_bg, on_col, off_col = (SG_GOLD, SG_INK, SG_MUTED) if night else (C("INK"), C("CARD"), C("GRAY"))
-    img, pad = soft_shadow(WIDTH + 40, TAB_BAR_HEIGHT + 20, 0, 8, 30 if not (state.dark_mode or night) else 120)
-    surface.blit(img, (-20 - pad, y0 - pad - 2))
+    on_col, off_col = SG_TEXT, (170, 170, 178)
     pygame.draw.rect(surface, bar_bg, (0, y0, WIDTH, TAB_BAR_HEIGHT))
     pygame.draw.line(surface, bar_line, (0, y0), (WIDTH, y0), 1)
 
@@ -14378,10 +14328,6 @@ def draw_tab_bar(surface):
     counts = notification_counts()
     active_index = next((i for i, (key, _, _) in enumerate(items)
                          if (key == "__menu__" and menu_open) or (key == state.tab and not menu_open)), None)
-    if active_index is not None:
-        pill_x = tween("tab_pill", active_index * col_w, 16.0)
-        pill = pygame.Rect(int(pill_x + 7), int(y0 + 7), int(col_w - 14), TAB_BAR_HEIGHT - 14)
-        draw_rounded_rect(surface, pill, pill_bg, radius=14, shadow=False)
     for i, (key, label, icon) in enumerate(items):
         x = i * col_w
         rect = pygame.Rect(int(x), int(y0), int(col_w + 1), TAB_BAR_HEIGHT)
@@ -14393,7 +14339,7 @@ def draw_tab_bar(surface):
         surface.blit(label_s, label_s.get_rect(center=(cx, y0 + 44)))
         badge = counts.get(key, 0) if key != "__menu__" else counts["news"] + counts["leaderboard"] + counts["rewards"]
         if badge and not (key == "__menu__" and menu_open):
-            draw_count_badge(surface, cx + 14, y0 + 11, badge)
+            pygame.draw.circle(surface, SG_GREEN, (cx + 12, y0 + 12), 4)   # quiet dot, no number
         tab_button_rects.append((rect, key))
 
 
@@ -14588,16 +14534,11 @@ def notification_counts():
 
 
 def draw_count_badge(surface, cx, cy, n):
-    """Red notification bubble with a number, like app icons on a phone."""
+    """Small green dot: something new here. No red numbers competing for attention."""
     if n <= 0:
         return
-    label = "9+" if n > 9 else str(n)
-    w = max(18, font_tiny.size(label)[0] + 10)
-    r = pygame.Rect(0, 0, w, 18)
-    r.center = (int(cx), int(cy))
-    pygame.draw.rect(surface, C("CARD"), r.inflate(4, 4), border_radius=11)
-    pygame.draw.rect(surface, (235, 64, 52), r, border_radius=9)
-    draw_text(surface, label, font_tiny, (255, 255, 255), r.centerx, r.y + 1, align="center")
+    pygame.draw.circle(surface, C("CARD"), (int(cx) - 4, int(cy) + 2), 6)
+    pygame.draw.circle(surface, SG_GREEN, (int(cx) - 4, int(cy) + 2), 4)
 
 
 def time_ago(t):
@@ -14684,7 +14625,7 @@ def draw_toast(surface):
     rect = pygame.Rect(14, int(-h - 10 + (h + 22) * slide), WIDTH - 28, h)
     global toast_rect
     toast_rect = rect if t.get("action") else None
-    bg = (28, 26, 44) if special else C("CARD")
+    bg = SG_PANEL if special else C("CARD")
     draw_rounded_rect(surface, rect, bg, radius=18, border_color=accent if special else C("BORDER"), border_width=2 if special else 1)
     if special:
         # A soft shine sweeping across celebratory toasts.
