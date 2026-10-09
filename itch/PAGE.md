@@ -14,7 +14,7 @@
 **Tags:** educational, finance, stock-market, simulation, kids, money, singleplayer
 **Cover image:** `cover.png`
 **Screenshots:** from the `docs` folder: `home.png`, `market.png`, `lesson.png`, `scam.png`, `battle.png`, `portfolio.png`
-**Links (in the description):** GitHub: https://github.com/rohincodes15-websites/Ledger-Stock-Market
+**Links (in the description):** GitHub: https://github.com/RohinCodes15/Ledger-Stock-Market
 **Visibility:** Draft first, check the page, then **Public**
 
 ---
@@ -37,4 +37,4 @@ Buy and sell 73 real companies in a simulated market, watch your portfolio grow 
 - **Mac** (Apple Silicon, M1 or newer): unzip, then **right-click Ledger → Open → Open** the first time. macOS asks because the app isn't from the App Store.
 - **Windows**: unzip the folder, open **Ledger.exe**. If a blue "Windows protected your PC" box appears, click **More info → Run anyway**.
 
-Made by Rohin Pidathala. The code is open source on GitHub: https://github.com/rohincodes15-websites/Ledger-Stock-Market
+Made by Rohin Pidathala. The code is open source on GitHub: https://github.com/RohinCodes15/Ledger-Stock-Market
